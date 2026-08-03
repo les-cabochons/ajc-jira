@@ -1,0 +1,46 @@
+{
+  "id": "jira",
+  "version": "1.0.0",
+  "apiVersion": 1,
+  "displayName": "Jira",
+  "description": "Sync Jira issues into backlog.",
+  "iconSvg": "<svg xmlns=\"http://www.w3.org/2000/svg\" preserveAspectRatio=\"xMidYMid\" viewBox=\"0 0 256 256\"><defs><linearGradient x1=\"99.7%\" y1=\"15.8%\" x2=\"39.8%\" y2=\"97.4%\" id=\"a\"><stop stop-color=\"#0052CC\" offset=\"0%\"/><stop stop-color=\"#2684FF\" offset=\"92.3%\"/></linearGradient></defs><path d=\"M76 118c-4-4-10-4-13 1L1 245a7 7 0 0 0 6 10h88c3 0 5-1 6-4 19-39 8-98-25-133Z\" fill=\"url(#a)\"/><path d=\"M122 4c-35 56-33 117-10 163l42 84c1 3 4 4 7 4h87a7 7 0 0 0 7-10L134 4c-2-5-9-5-12 0Z\" fill=\"#2681FF\"/></svg>",
+  "entrypoint": "dist/plugin.js",
+  "connectionFields": [
+    { "id": "label", "label": "Connection label", "type": "text", "required": true, "placeholder": "Product backlog" },
+    { "id": "tenantLabel", "label": "Workspace", "type": "text", "required": true, "placeholder": "Acme Jira" },
+    { "id": "baseUrl", "label": "Site URL", "type": "url", "required": true, "placeholder": "https://your-domain.atlassian.net" },
+    { "id": "email", "label": "Email", "type": "text", "required": true, "placeholder": "name@example.com" },
+    { "id": "apiToken", "label": "API token", "type": "password", "required": true, "secret": true, "placeholder": "Atlassian API token" },
+    { "id": "projectKey", "label": "Project key", "type": "text", "placeholder": "Optional: ENG" },
+    {
+      "id": "queryScope",
+      "label": "Import scope",
+      "type": "select",
+      "required": true,
+      "defaultValue": "assigned_to_me",
+      "options": [
+        { "value": "assigned_to_me", "label": "Assigned to me" },
+        { "value": "project_open_issues", "label": "Open issues" }
+      ]
+    },
+    {
+      "id": "taskIconDisplayMode",
+      "label": "Imported task icon",
+      "type": "select",
+      "required": true,
+      "defaultValue": "always",
+      "helpText": "Choose whether imported tasks keep the connector icon or switch to the linked project icon.",
+      "options": [
+        { "value": "always", "label": "Always show connector icon" },
+        { "value": "fallback", "label": "Use connector icon as fallback" },
+        { "value": "never", "label": "Never show connector icon" }
+      ]
+    },
+    { "id": "originalEstimateFieldName", "label": "Original estimate field", "type": "text", "placeholder": "Original estimate field name or id" },
+    { "id": "remainingEstimateFieldName", "label": "Remaining field", "type": "text", "placeholder": "Remaining estimate field name or id" },
+    { "id": "completedEstimateFieldName", "label": "Completed field", "type": "text", "placeholder": "Completed estimate field name or id" },
+    { "id": "autoSync", "label": "Auto sync to backlog", "type": "checkbox", "defaultValue": false, "helpText": "Import directly to backlog while the app is open." },
+    { "id": "autoSyncIntervalMinutes", "label": "Auto sync interval (minutes)", "type": "number", "defaultValue": 15, "min": 1, "max": 1440, "step": 1 }
+  ]
+}
