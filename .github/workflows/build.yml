@@ -6,7 +6,7 @@ on:
       - main
 
 permissions:
-  contents: read
+  contents: write
 
 concurrency:
   group: connector-build-${{ github.ref }}
@@ -56,3 +56,28 @@ jobs:
           path: package/*.harday-connector
           if-no-files-found: error
           retention-days: 30
+
+      - name: Publish connector prerelease
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: v${{ steps.connector.outputs.version }}
+        run: |
+          archive="$(find package -maxdepth 1 -type f -name '*.harday-connector' -print -quit)"
+          if [[ -z "$archive" ]]; then
+            echo "No packaged connector archive was found." >&2
+            exit 1
+          fi
+
+          if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$RELEASE_TAG" "$archive" --clobber --repo "$GITHUB_REPOSITORY"
+            exit 0
+          fi
+
+          gh release create "$RELEASE_TAG" "$archive" \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$GITHUB_SHA" \
+            --title "Ajour Connector - Jira $RELEASE_TAG" \
+            --generate-notes \
+            --prerelease \
+            --latest=false
