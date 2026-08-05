@@ -8,6 +8,7 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { create } from "tar";
+import { assertConnectorPluginManifest } from "./connector-manifest.mjs";
 
 const pluginRoot = process.cwd();
 const manifestPath = path.join(pluginRoot, "plugin.json");
@@ -15,24 +16,7 @@ const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
 const packageMetadata = JSON.parse(
   await readFile(path.join(pluginRoot, "package.json"), "utf8"),
 );
-const pluginIdPattern = /^[a-z0-9]+(?:[._-][a-z0-9]+)*$/;
-const pluginVersionPattern = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/;
-
-if (
-  typeof manifest.id !== "string" ||
-  typeof manifest.version !== "string" ||
-  typeof manifest.entrypoint !== "string"
-) {
-  throw new Error("Connector manifest must define id, version, and entrypoint.");
-}
-
-if (
-  !pluginIdPattern.test(manifest.id) ||
-  !pluginVersionPattern.test(manifest.version) ||
-  manifest.apiVersion !== 1
-) {
-  throw new Error("Connector manifest id, version, or API version is invalid.");
-}
+assertConnectorPluginManifest(manifest);
 
 if (packageMetadata.version !== manifest.version) {
   throw new Error("package.json and plugin.json must declare the same version.");

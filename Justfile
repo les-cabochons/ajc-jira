@@ -21,6 +21,10 @@ install:
 test:
     {{PNPM}} test
 
+[doc("Watches connector TypeScript and rebuilds on changes")]
+dev:
+    {{PNPM}} dev
+
 [doc("Runs TypeScript checks")]
 typecheck:
     {{PNPM}} typecheck

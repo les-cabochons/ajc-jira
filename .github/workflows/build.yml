@@ -6,24 +6,26 @@ on:
       - main
 
 permissions:
-  contents: write
-
-concurrency:
-  group: connector-build-${{ github.ref }}
-  cancel-in-progress: true
+  contents: read
 
 jobs:
   build:
     name: Test and package
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      artifact_name: ${{ steps.connector.outputs.artifact_name }}
+      asset_filename: ${{ steps.connector.outputs.asset_filename }}
+      version: ${{ steps.connector.outputs.version }}
     steps:
       - name: Check out repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           persist-credentials: false
 
       - name: Set up Node.js
-        uses: actions/setup-node@v7
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
         with:
           node-version: 22
 
@@ -45,39 +47,92 @@ jobs:
         run: |
           version="$(node scripts/set-build-version.mjs "main.${GITHUB_RUN_NUMBER}.${GITHUB_SHA::7}")"
           echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "artifact_name=jira-$version" >> "$GITHUB_OUTPUT"
+          echo "asset_filename=jira-$version.harday-connector" >> "$GITHUB_OUTPUT"
 
       - name: Package connector
         run: corepack pnpm package
 
       - name: Upload installable connector
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
-          name: jira-${{ steps.connector.outputs.version }}
-          path: package/*.harday-connector
+          name: ${{ steps.connector.outputs.artifact_name }}
+          path: package/${{ steps.connector.outputs.asset_filename }}
           if-no-files-found: error
           retention-days: 30
+
+  publish:
+    name: Publish prerelease
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download installable connector
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: ${{ needs.build.outputs.artifact_name }}
+          path: release-assets
 
       - name: Publish connector prerelease
         shell: bash
         env:
+          EXPECTED_ASSET_NAME: ${{ needs.build.outputs.asset_filename }}
+          EXPECTED_RELEASE_NAME: Ajour Connector - Jira v${{ needs.build.outputs.version }}
           GH_TOKEN: ${{ github.token }}
-          RELEASE_TAG: v${{ steps.connector.outputs.version }}
+          RELEASE_TAG: v${{ needs.build.outputs.version }}
         run: |
-          archive="$(find package -maxdepth 1 -type f -name '*.harday-connector' -print -quit)"
-          if [[ -z "$archive" ]]; then
-            echo "No packaged connector archive was found." >&2
+          set -euo pipefail
+
+          archive="release-assets/$EXPECTED_ASSET_NAME"
+          if [[ ! -f "$archive" ]]; then
+            echo "Expected packaged connector archive was not found: $archive" >&2
             exit 1
           fi
 
-          if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+          ref_api="repos/$GITHUB_REPOSITORY/git/ref/tags/$RELEASE_TAG"
+          assert_tag_target() {
+            local tag_type tag_sha
+            tag_type="$(gh api "$ref_api" --jq '.object.type')"
+            tag_sha="$(gh api "$ref_api" --jq '.object.sha')"
+            if [[ "$tag_type" != "commit" || "$tag_sha" != "$GITHUB_SHA" ]]; then
+              echo "Refusing to publish: $RELEASE_TAG does not point directly to $GITHUB_SHA." >&2
+              exit 1
+            fi
+          }
+
+          release_api="repos/$GITHUB_REPOSITORY/releases/tags/$RELEASE_TAG"
+          if gh api "$release_api" >/dev/null 2>&1; then
+            release_state="$(gh api "$release_api" --jq '[.tag_name, .name, (.draft | tostring), (.prerelease | tostring)] | @tsv')"
+            IFS=$'\t' read -r actual_tag actual_name is_draft is_prerelease <<< "$release_state"
+            if [[ "$actual_tag" != "$RELEASE_TAG" || "$actual_name" != "$EXPECTED_RELEASE_NAME" || "$is_draft" != "false" || "$is_prerelease" != "true" ]]; then
+              echo "Refusing to overwrite a release whose identity or state does not match this build." >&2
+              exit 1
+            fi
+
+            assert_tag_target
+
+            existing_assets="$(gh api "$release_api" --jq '.assets[].name')"
+            while IFS= read -r existing_asset; do
+              [[ -z "$existing_asset" ]] && continue
+              if [[ "$existing_asset" != "$EXPECTED_ASSET_NAME" ]]; then
+                echo "Refusing to overwrite a release containing unexpected asset: $existing_asset" >&2
+                exit 1
+              fi
+            done <<< "$existing_assets"
+
             gh release upload "$RELEASE_TAG" "$archive" --clobber --repo "$GITHUB_REPOSITORY"
             exit 0
+          fi
+
+          if gh api "$ref_api" >/dev/null 2>&1; then
+            assert_tag_target
           fi
 
           gh release create "$RELEASE_TAG" "$archive" \
             --repo "$GITHUB_REPOSITORY" \
             --target "$GITHUB_SHA" \
-            --title "Ajour Connector - Jira $RELEASE_TAG" \
+            --title "$EXPECTED_RELEASE_NAME" \
             --generate-notes \
             --prerelease \
             --latest=false

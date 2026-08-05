@@ -18,6 +18,13 @@ just typecheck
 just build
 ```
 
+To rebuild the development plugin whenever its source changes, keep the watcher
+running:
+
+```sh
+just dev
+```
+
 Run the complete local CI path with:
 
 ```sh
