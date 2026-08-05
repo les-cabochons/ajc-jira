@@ -1,0 +1,58 @@
+name: Build connector
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: connector-build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Test and package
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: 22
+
+      - name: Enable Corepack
+        run: corepack enable
+
+      - name: Install dependencies
+        run: corepack pnpm install --frozen-lockfile
+
+      - name: Run tests
+        run: corepack pnpm test
+
+      - name: Run TypeScript checks
+        run: corepack pnpm typecheck
+
+      - name: Set connector build version
+        id: connector
+        shell: bash
+        run: |
+          version="$(node scripts/set-build-version.mjs "main.${GITHUB_RUN_NUMBER}.${GITHUB_SHA::7}")"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Package connector
+        run: corepack pnpm package
+
+      - name: Upload installable connector
+        uses: actions/upload-artifact@v7
+        with:
+          name: jira-${{ steps.connector.outputs.version }}
+          path: package/*.harday-connector
+          if-no-files-found: error
+          retention-days: 30
