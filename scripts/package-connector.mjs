@@ -54,7 +54,7 @@ await writeFile(
 const outputDirectory = path.join(pluginRoot, "package");
 const outputPath = path.join(
   outputDirectory,
-  `${manifest.id}-${manifest.version}.harday-connector`,
+  `${manifest.id}-${manifest.version}.ajour-connector`,
 );
 await rm(outputDirectory, { recursive: true, force: true });
 await mkdir(outputDirectory, { recursive: true });

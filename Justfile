@@ -33,7 +33,7 @@ typecheck:
 build:
     {{PNPM}} build
 
-[doc("Builds the installable .harday-connector archive")]
+[doc("Builds the installable .ajour-connector archive")]
 package:
     {{PNPM}} package
 

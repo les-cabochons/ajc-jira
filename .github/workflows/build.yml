@@ -48,7 +48,7 @@ jobs:
           version="$(node scripts/set-build-version.mjs "main.${GITHUB_RUN_NUMBER}.${GITHUB_SHA::7}")"
           echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "artifact_name=jira-$version" >> "$GITHUB_OUTPUT"
-          echo "asset_filename=jira-$version.harday-connector" >> "$GITHUB_OUTPUT"
+          echo "asset_filename=jira-$version.ajour-connector" >> "$GITHUB_OUTPUT"
 
       - name: Package connector
         run: corepack pnpm package
