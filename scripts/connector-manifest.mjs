@@ -123,11 +123,11 @@ export function assertConnectorPluginManifest(manifest) {
   assertRecord(manifest.capabilities, "Connector manifest capabilities");
   const capabilityNames = Object.keys(manifest.capabilities);
   if (
-    capabilityNames.length === 0 ||
+    !capabilityNames.includes("connector") ||
     capabilityNames.some((name) => name !== "connector" && name !== "codeHost")
   ) {
     throw new Error(
-      "Connector manifest capabilities must declare connector, codeHost or both.",
+      "Connector manifest capabilities must declare connector and may also declare codeHost.",
     );
   }
   for (const name of capabilityNames) {

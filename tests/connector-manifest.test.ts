@@ -44,12 +44,19 @@ describe("connector manifest packaging contract", () => {
     );
   });
 
-  it("rejects a manifest without the connector capability", () => {
+  it.each([{}, { codeHost: {} }])("rejects a manifest without the connector capability: %j", (capabilities) => {
     const manifest = cloneManifest();
-    manifest.capabilities = {};
+    manifest.capabilities = capabilities;
 
     expect(() => assertConnectorPluginManifest(manifest)).toThrow(
       /capabilities/,
     );
+  });
+
+  it("accepts a connector that also declares codeHost", () => {
+    const manifest = cloneManifest();
+    manifest.capabilities.codeHost = {};
+
+    expect(assertConnectorPluginManifest(manifest)).toBe(manifest);
   });
 });
