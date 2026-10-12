@@ -116,8 +116,22 @@ export function assertConnectorPluginManifest(manifest) {
     pattern: pluginVersionPattern,
   });
 
-  if (manifest.apiVersion !== 1) {
-    throw new Error("Connector manifest API version must be 1.");
+  if (manifest.apiVersion !== 2) {
+    throw new Error("Connector manifest API version must be 2.");
+  }
+
+  assertRecord(manifest.capabilities, "Connector manifest capabilities");
+  const capabilityNames = Object.keys(manifest.capabilities);
+  if (
+    capabilityNames.length === 0 ||
+    capabilityNames.some((name) => name !== "connector" && name !== "codeHost")
+  ) {
+    throw new Error(
+      "Connector manifest capabilities must declare connector, codeHost or both.",
+    );
+  }
+  for (const name of capabilityNames) {
+    assertRecord(manifest.capabilities[name], "Connector manifest capabilities." + name);
   }
 
   assertString(manifest.displayName, "Connector manifest displayName", {
