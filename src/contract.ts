@@ -49,6 +49,10 @@ export interface ConnectorImportCandidateInput {
   projectName?: string;
   workItemType: string;
   state?: string;
+  /** The status category's name, such as "In Progress". */
+  stateCategory?: string;
+  /** True in the Done category. Ajour archives done items. */
+  stateDone?: boolean;
   assignedTo?: string;
   priority?: number;
   originalEstimateHours?: number;
@@ -99,6 +103,36 @@ export interface ConnectorSyncWorkItemUpdate {
     remainingEstimateHours?: ConnectorSyncFieldUpdate;
     completedEstimateHours?: ConnectorSyncFieldUpdate;
   };
+}
+
+/** A state a backlog item can move to when it is settled. */
+export interface ConnectorSettleState {
+  name: string;
+  category: string;
+  done: boolean;
+}
+
+export interface ConnectorSettleStatesRequest {
+  sourceId: string;
+}
+
+export interface ConnectorSettleStatesResult {
+  states: ConnectorSettleState[];
+}
+
+/** Only the fields the settle changed. */
+export interface ConnectorSettleWriteRequest {
+  sourceId: string;
+  state?: string;
+  priority?: number;
+}
+
+/** The issue's values in Jira after the write. */
+export interface ConnectorSettleWriteResult {
+  state?: string;
+  stateCategory?: string;
+  stateDone?: boolean;
+  priority?: number;
 }
 
 export interface ConnectorPluginSyncResult {

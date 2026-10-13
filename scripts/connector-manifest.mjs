@@ -133,6 +133,27 @@ export function assertConnectorPluginManifest(manifest) {
   for (const name of capabilityNames) {
     assertRecord(manifest.capabilities[name], "Connector manifest capabilities." + name);
   }
+  const connector = manifest.capabilities.connector;
+  assertOptionalBoolean(connector?.settle, "Connector manifest capabilities.connector.settle");
+  if (connector?.priorityScale !== undefined) {
+    assertRecord(connector.priorityScale, "Connector manifest capabilities.connector.priorityScale");
+    for (const [level, range] of Object.entries(connector.priorityScale)) {
+      const label = "Connector manifest capabilities.connector.priorityScale." + level;
+      if (!["urgent", "high", "medium", "low"].includes(level)) {
+        throw new Error(label + " is not a priority level.");
+      }
+      assertRecord(range, label);
+      if (
+        !Number.isInteger(range.min) ||
+        !Number.isInteger(range.max) ||
+        range.min < 0 ||
+        range.max > 999 ||
+        range.min > range.max
+      ) {
+        throw new Error(label + " must be a range of whole numbers from 0 to 999.");
+      }
+    }
+  }
 
   assertString(manifest.displayName, "Connector manifest displayName", {
     min: 1,

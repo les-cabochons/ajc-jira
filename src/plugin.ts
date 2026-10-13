@@ -1,6 +1,8 @@
 import type {
   ConnectorFieldValues,
   ConnectorPluginConnection,
+  ConnectorSettleStatesRequest,
+  ConnectorSettleWriteRequest,
   ConnectorSyncWorkItem,
 } from "./contract.js";
 import { parseConnectorFieldValues } from "./contract.js";
@@ -9,6 +11,7 @@ import {
   type JiraConnectionInput,
   validateJiraConnection,
 } from "./jira.js";
+import { listJiraSettleStates, writeJiraSettle } from "./settle.js";
 
 const TASK_ICON_DISPLAY_MODES = new Set(["always", "fallback", "never"]);
 
@@ -84,4 +87,18 @@ export async function syncConnection(
 ) {
   const jiraConfig = buildJiraConfig(connection.config, connection);
   return await syncJiraConnection(jiraConfig, workItems);
+}
+
+export async function listSettleStates(
+  connection: ConnectorPluginConnection,
+  request: ConnectorSettleStatesRequest,
+) {
+  return await listJiraSettleStates(buildJiraConfig(connection.config, connection), request.sourceId);
+}
+
+export async function writeSettle(
+  connection: ConnectorPluginConnection,
+  request: ConnectorSettleWriteRequest,
+) {
+  return await writeJiraSettle(buildJiraConfig(connection.config, connection), request);
 }

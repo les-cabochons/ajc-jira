@@ -59,4 +59,17 @@ describe("connector manifest packaging contract", () => {
 
     expect(assertConnectorPluginManifest(manifest)).toBe(manifest);
   });
+
+  it("declares settle and a priority scale, and rejects invalid ones", () => {
+    expect(validManifest.capabilities.connector.settle).toBe(true);
+    expect(validManifest.capabilities.connector.priorityScale.low).toEqual({ min: 75, max: 100 });
+
+    const badSettle = cloneManifest();
+    badSettle.capabilities.connector.settle = "yes";
+    expect(() => assertConnectorPluginManifest(badSettle)).toThrow(/settle/);
+
+    const badScale = cloneManifest();
+    badScale.capabilities.connector.priorityScale.low = { min: 100, max: 75 };
+    expect(() => assertConnectorPluginManifest(badScale)).toThrow(/priorityScale/);
+  });
 });
