@@ -57,7 +57,7 @@ interface JiraSearchResponse {
   issues?: JiraIssue[];
 }
 
-interface JiraIssue {
+export interface JiraIssue {
   id: string;
   key: string;
   fields?: Record<string, unknown>;
@@ -71,7 +71,7 @@ function createAuthHeader(email: string, apiToken: string) {
   return `Basic ${Buffer.from(`${email}:${apiToken}`, "utf8").toString("base64")}`;
 }
 
-function normalizeDisplayValue(value: unknown): string | undefined {
+export function normalizeDisplayValue(value: unknown): string | undefined {
   if (typeof value === "string") {
     const trimmed = value.trim();
     return trimmed.length > 0 ? trimmed : undefined;
@@ -141,15 +141,22 @@ function compactFieldValues(values: Record<string, string | number | boolean | u
   );
 }
 
-function getStatusName(issue: JiraIssue) {
+export function getStatusName(issue: JiraIssue) {
   return normalizeDisplayValue((issue.fields?.status as { name?: string } | undefined)?.name ?? issue.fields?.status);
 }
 
+/** The issue's status category: "new", "indeterminate" or "done", and its name. */
+export function getStatusCategory(issue: JiraIssue) {
+  const category = (issue.fields?.status as { statusCategory?: { key?: string; name?: string } } | undefined)
+    ?.statusCategory;
+  return {
+    key: normalizeDisplayValue(category?.key)?.toLowerCase(),
+    name: normalizeDisplayValue(category?.name),
+  };
+}
+
 function isOpenIssue(issue: JiraIssue) {
-  const statusCategoryKey = normalizeDisplayValue(
-    (issue.fields?.status as { statusCategory?: { key?: string } } | undefined)?.statusCategory?.key,
-  );
-  return statusCategoryKey?.toLowerCase() !== CLOSED_STATUS_CATEGORY;
+  return getStatusCategory(issue).key !== CLOSED_STATUS_CATEGORY;
 }
 
 function isSubtask(issue: JiraIssue) {
@@ -157,11 +164,11 @@ function isSubtask(issue: JiraIssue) {
   return issueType?.subtask === true || Boolean(issue.fields?.parent);
 }
 
-function buildIssueUrl(config: JiraConnectionInput, issueKey: string) {
+export function buildIssueUrl(config: JiraConnectionInput, issueKey: string) {
   return `${normalizeBaseUrl(config.baseUrl)}/browse/${issueKey}`;
 }
 
-function buildJql(config: JiraConnectionInput, issueKeys?: string[]) {
+export function buildJql(config: JiraConnectionInput, issueKeys?: string[]) {
   const clauses: string[] = [];
 
   if (issueKeys?.length) {
@@ -182,7 +189,7 @@ function buildJql(config: JiraConnectionInput, issueKeys?: string[]) {
   return `${clauses.join(" AND ")} ORDER BY updated DESC`;
 }
 
-async function requestJira<T>(
+export async function requestJira<T>(
   config: JiraConnectionInput,
   pathname: string,
   init?: RequestInit,
@@ -219,10 +226,12 @@ async function requestJira<T>(
     throw new Error(`Jira request failed (${response.status}): ${detail}`);
   }
 
-  return (await response.json()) as T;
+  // Updates and transitions answer 204 No Content.
+  const text = await response.text();
+  return (text ? JSON.parse(text) : undefined) as T;
 }
 
-async function searchIssues(
+export async function searchIssues(
   config: JiraConnectionInput,
   jql: string,
   additionalFields: string[] = [],
@@ -293,7 +302,7 @@ async function updateJiraIssueFields(
   );
 }
 
-function parsePriorityValue(value: unknown): number | undefined {
+export function parsePriorityValue(value: unknown): number | undefined {
   const priorityName = normalizeDisplayValue((value as { name?: string } | undefined)?.name ?? value);
   if (!priorityName) {
     return undefined;
@@ -462,6 +471,8 @@ function mapIssueToCandidate(
       projectName,
       workItemType: issueType,
       state,
+      stateCategory: getStatusCategory(issue).name,
+      stateDone: false,
       assignedTo,
       priority: parsePriorityValue(issue.fields?.priority),
       originalEstimateHours,
@@ -499,6 +510,8 @@ function mapIssueToCandidate(
     projectName,
     workItemType: issueType,
     state,
+    stateCategory: getStatusCategory(issue).name,
+    stateDone: false,
     assignedTo,
     priority: parsePriorityValue(issue.fields?.priority),
     originalEstimateHours,
@@ -722,13 +735,81 @@ export async function fetchJiraImportCandidates(config: JiraConnectionInput) {
   return { items: syncContext.items };
 }
 
+/** The issue key at the end of a browse URL, such as `.../browse/ABC-12`. */
+export function parseJiraIssueKey(sourceId: string): string | null {
+  const match = /\/browse\/([A-Za-z][A-Za-z0-9_]*-\d+)\/?$/.exec(sourceId.trim());
+  return match ? match[1]!.toUpperCase() : null;
+}
+
+const DONE_LOOKUP_CHUNK_SIZE = 100;
+
+/**
+ * Ajour's issues that reached the Done category, so Ajour archives them. The
+ * sync query leaves Done issues out, so they are looked up by key.
+ */
+async function findDoneIssues(
+  config: JiraConnectionInput,
+  syncContext: JiraSyncContext,
+  workItems: ConnectorSyncWorkItem[],
+): Promise<ConnectorImportCandidateInput[]> {
+  const sourceIdsByKey = new Map<string, string>();
+  for (const workItem of workItems) {
+    const key = parseJiraIssueKey(workItem.sourceId);
+    if (key && !syncContext.itemsBySourceId.has(workItem.sourceId)) {
+      sourceIdsByKey.set(key, workItem.sourceId);
+    }
+  }
+
+  const keys = Array.from(sourceIdsByKey.keys());
+  const issues: JiraIssue[] = [];
+  for (let index = 0; index < keys.length; index += DONE_LOOKUP_CHUNK_SIZE) {
+    issues.push(
+      ...(await searchIssues(config, buildJql(config, keys.slice(index, index + DONE_LOOKUP_CHUNK_SIZE)))),
+    );
+  }
+
+  return issues.flatMap((issue): ConnectorImportCandidateInput[] => {
+    const sourceId = sourceIdsByKey.get(issue.key.toUpperCase());
+    const category = getStatusCategory(issue);
+    if (!sourceId || category.key !== CLOSED_STATUS_CATEGORY) {
+      return [];
+    }
+
+    return [
+      {
+        source: "jira",
+        connectionId: config.id ?? "unknown_connection",
+        connectionLabel: config.label,
+        tenantLabel: config.tenantLabel,
+        sourceId,
+        externalId: issue.key,
+        sourceUrl: sourceId,
+        title: normalizeDisplayValue(issue.fields?.summary) ?? issue.key,
+        projectName: normalizeDisplayValue(issue.fields?.project),
+        workItemType:
+          normalizeDisplayValue((issue.fields?.issuetype as { name?: string } | undefined)?.name) ?? "Issue",
+        state: getStatusName(issue),
+        stateCategory: category.name,
+        stateDone: true,
+        depth: 0,
+        selectable: false,
+        selected: false,
+        childCount: 0,
+      },
+    ];
+  });
+}
+
 export async function syncJiraConnection(
   config: JiraConnectionInput,
   workItems: ConnectorSyncWorkItem[] = [],
 ): Promise<ConnectorPluginSyncResult> {
   const syncContext = await fetchJiraSyncContext(config);
+  const workItemUpdates = await buildJiraWorkItemUpdates(config, syncContext, workItems);
+  // Last, so the sync's earlier requests keep their order.
+  const doneItems = await findDoneIssues(config, syncContext, workItems);
   return {
-    items: syncContext.items,
-    workItemUpdates: await buildJiraWorkItemUpdates(config, syncContext, workItems),
+    items: [...syncContext.items, ...doneItems],
+    workItemUpdates,
   };
 }
