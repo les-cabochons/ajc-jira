@@ -9,11 +9,11 @@ import {
   getStatusName,
   normalizeDisplayValue,
   parseJiraIssueKey,
-  parsePriorityValue,
   requestJira,
   type JiraConnectionInput,
   type JiraIssue,
 } from "./jira.js";
+import { jiraPriorityToLevel, levelToJiraPriority } from "./priority.js";
 
 /**
  * Settling a backlog item from Ajour: the statuses an issue can move to, and
@@ -22,15 +22,6 @@ import {
 
 /** Jira's status categories, in workflow order. */
 const CATEGORY_ORDER = ["new", "indeterminate", "done"];
-
-/** Ajour's source priority for each Jira priority, as sync reads it. */
-const PRIORITY_NAMES = new Map([
-  [0, "Highest"],
-  [25, "High"],
-  [50, "Medium"],
-  [75, "Low"],
-  [100, "Lowest"],
-]);
 
 interface JiraStatus {
   name?: unknown;
@@ -131,9 +122,9 @@ export async function writeJiraSettle(
   }
 
   if (request.priority !== undefined) {
-    const priorityName = PRIORITY_NAMES.get(request.priority);
+    const priorityName = levelToJiraPriority(request.priority);
     if (!priorityName) {
-      throw new Error(`Jira has no priority for the value ${request.priority}.`);
+      throw new Error(`"${request.priority}" is not an Ajour priority level.`);
     }
     await requestJira(config, `/rest/api/3/issue/${encodeURIComponent(key)}`, {
       method: "PUT",
@@ -172,6 +163,6 @@ export async function writeJiraSettle(
     state: getStatusName(updated),
     stateCategory: category.name,
     stateDone: category.key === "done",
-    priority: parsePriorityValue(updated.fields?.priority),
+    priority: jiraPriorityToLevel(normalizeDisplayValue(updated.fields?.priority)),
   };
 }

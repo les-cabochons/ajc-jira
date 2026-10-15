@@ -37,7 +37,7 @@ describe("connector manifest packaging contract", () => {
 
   it("rejects unsupported API versions", () => {
     const manifest = cloneManifest();
-    manifest.apiVersion = 1;
+    manifest.apiVersion = 2;
 
     expect(() => assertConnectorPluginManifest(manifest)).toThrow(
       /API version/,
@@ -60,16 +60,16 @@ describe("connector manifest packaging contract", () => {
     expect(assertConnectorPluginManifest(manifest)).toBe(manifest);
   });
 
-  it("declares settle and a priority scale, and rejects invalid ones", () => {
+  it("declares settle and rejects an invalid one", () => {
     expect(validManifest.capabilities.connector.settle).toBe(true);
-    expect(validManifest.capabilities.connector.priorityScale.low).toEqual({ min: 75, max: 100 });
 
     const badSettle = cloneManifest();
     badSettle.capabilities.connector.settle = "yes";
     expect(() => assertConnectorPluginManifest(badSettle)).toThrow(/settle/);
+  });
 
-    const badScale = cloneManifest();
-    badScale.capabilities.connector.priorityScale.low = { min: 100, max: 75 };
-    expect(() => assertConnectorPluginManifest(badScale)).toThrow(/priorityScale/);
+  it("declares API version 3 with no priority scale, since the plugin maps priorities itself", () => {
+    expect(validManifest.apiVersion).toBe(3);
+    expect(validManifest.capabilities.connector).not.toHaveProperty("priorityScale");
   });
 });
