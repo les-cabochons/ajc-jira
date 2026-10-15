@@ -6,6 +6,7 @@ import type {
   ConnectorSyncWorkItemUpdate,
   JiraQueryScope,
 } from "./contract.js";
+import { adfToMarkdown } from "./adf-markdown.js";
 import { resolveEstimateSyncAction } from "./estimate-sync.js";
 
 const CLOSED_STATUS_CATEGORY = "done";
@@ -83,44 +84,6 @@ export function normalizeDisplayValue(value: unknown): string | undefined {
     const name = "name" in value ? normalizeDisplayValue(value.name) : undefined;
     const key = "key" in value ? normalizeDisplayValue(value.key) : undefined;
     return displayName ?? name ?? key;
-  }
-
-  return undefined;
-}
-
-function extractDocumentText(value: unknown): string | undefined {
-  if (!value) {
-    return undefined;
-  }
-
-  if (typeof value === "string") {
-    const trimmed = value.trim();
-    return trimmed.length > 0 ? trimmed : undefined;
-  }
-
-  if (!Array.isArray(value) && typeof value === "object") {
-    const node = value as {
-      text?: unknown;
-      content?: unknown;
-    };
-
-    const parts: string[] = [];
-    const textValue = normalizeDisplayValue(node.text);
-    if (textValue) {
-      parts.push(textValue);
-    }
-
-    if (Array.isArray(node.content)) {
-      for (const child of node.content) {
-        const childText = extractDocumentText(child);
-        if (childText) {
-          parts.push(childText);
-        }
-      }
-    }
-
-    const normalized = parts.join("\n").replace(/\n{3,}/g, "\n\n").trim();
-    return normalized.length > 0 ? normalized : undefined;
   }
 
   return undefined;
@@ -437,7 +400,7 @@ function mapIssueToCandidate(
   const state = getStatusName(issue);
   const assignedTo = normalizeDisplayValue(issue.fields?.assignee);
   const projectName = normalizeDisplayValue(issue.fields?.project);
-  const note = extractDocumentText(issue.fields?.description);
+  const note = adfToMarkdown(issue.fields?.description);
   const originalEstimateHours = fieldIds?.originalEstimateFieldId
     ? parseEstimateValue(issue.fields?.[fieldIds.originalEstimateFieldId])
     : undefined;
