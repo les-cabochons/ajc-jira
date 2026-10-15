@@ -8,6 +8,7 @@ import type {
 } from "./contract.js";
 import { adfToMarkdown } from "./adf-markdown.js";
 import { resolveEstimateSyncAction } from "./estimate-sync.js";
+import { jiraPriorityToLevel } from "./priority.js";
 
 const CLOSED_STATUS_CATEGORY = "done";
 const MAX_RESULTS = 200;
@@ -265,28 +266,6 @@ async function updateJiraIssueFields(
   );
 }
 
-export function parsePriorityValue(value: unknown): number | undefined {
-  const priorityName = normalizeDisplayValue((value as { name?: string } | undefined)?.name ?? value);
-  if (!priorityName) {
-    return undefined;
-  }
-
-  switch (priorityName.toLowerCase()) {
-    case "highest":
-      return 0;
-    case "high":
-      return 25;
-    case "medium":
-      return 50;
-    case "low":
-      return 75;
-    case "lowest":
-      return 100;
-    default:
-      return undefined;
-  }
-}
-
 function normalizeConfiguredFieldName(value: string | undefined): string | undefined {
   const trimmed = value?.trim();
   return trimmed && trimmed.length > 0 ? trimmed : undefined;
@@ -437,7 +416,7 @@ function mapIssueToCandidate(
       stateCategory: getStatusCategory(issue).name,
       stateDone: false,
       assignedTo,
-      priority: parsePriorityValue(issue.fields?.priority),
+      priority: jiraPriorityToLevel(normalizeDisplayValue(issue.fields?.priority)),
       originalEstimateHours,
       remainingEstimateHours,
       completedEstimateHours,
@@ -476,7 +455,7 @@ function mapIssueToCandidate(
     stateCategory: getStatusCategory(issue).name,
     stateDone: false,
     assignedTo,
-    priority: parsePriorityValue(issue.fields?.priority),
+    priority: jiraPriorityToLevel(normalizeDisplayValue(issue.fields?.priority)),
     originalEstimateHours,
     remainingEstimateHours,
     completedEstimateHours,

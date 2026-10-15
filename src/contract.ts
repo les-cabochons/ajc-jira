@@ -1,5 +1,8 @@
 export type JiraQueryScope = "assigned_to_me" | "project_open_issues";
 
+/** Ajour's priority levels. The plugin maps Jira priorities to these. */
+export type ConnectorPriorityLevel = "urgent" | "high" | "medium" | "low";
+
 export type ConnectorFieldValue = string | number | boolean;
 export type ConnectorFieldValues = Record<string, ConnectorFieldValue>;
 
@@ -54,7 +57,8 @@ export interface ConnectorImportCandidateInput {
   /** True in the Done category. Ajour archives done items. */
   stateDone?: boolean;
   assignedTo?: string;
-  priority?: number;
+  /** Omitted when the Jira priority maps to no level. */
+  priority?: ConnectorPriorityLevel;
   originalEstimateHours?: number;
   remainingEstimateHours?: number;
   completedEstimateHours?: number;
@@ -124,7 +128,7 @@ export interface ConnectorSettleStatesResult {
 export interface ConnectorSettleWriteRequest {
   sourceId: string;
   state?: string;
-  priority?: number;
+  priority?: ConnectorPriorityLevel;
 }
 
 /** The issue's values in Jira after the write. */
@@ -132,7 +136,7 @@ export interface ConnectorSettleWriteResult {
   state?: string;
   stateCategory?: string;
   stateDone?: boolean;
-  priority?: number;
+  priority?: ConnectorPriorityLevel;
 }
 
 export interface ConnectorPluginSyncResult {

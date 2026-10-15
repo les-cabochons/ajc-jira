@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import type { ConnectorPriorityLevel } from "../src/contract.ts";
 import { syncJiraConnection, type JiraConnectionInput } from "../src/jira.ts";
 import { listJiraSettleStates, writeJiraSettle } from "../src/settle.ts";
 
@@ -129,6 +130,27 @@ describe("Jira status categories in sync", () => {
     ]);
     expect(result.items[1]?.sourceId).toBe(sourceId("ABC-2"));
   });
+
+  it("sends each issue's priority as an Ajour level, and none for a custom priority", async () => {
+    const open = status("To Do", "new");
+    fakeJira({
+      "ABC-1": { summary: "Outage", status: open, priority: "Highest" },
+      "ABC-2": { summary: "Typo", status: open, priority: "Lowest" },
+      "ABC-3": { summary: "Odd scheme", status: open, priority: "P2" },
+      "ABC-4": { summary: "No priority", status: open },
+    });
+
+    const result = await syncJiraConnection(buildConnection(), []);
+
+    expect(
+      Object.fromEntries(result.items.map((item) => [item.externalId, item.priority])),
+    ).toEqual({
+      "ABC-1": "urgent",
+      "ABC-2": "low",
+      "ABC-3": undefined,
+      "ABC-4": undefined,
+    });
+  });
 });
 
 describe("Jira settle", () => {
@@ -173,7 +195,7 @@ describe("Jira settle", () => {
     const result = await writeJiraSettle(buildConnection(), {
       sourceId: sourceId("ABC-7"),
       state: "done",
-      priority: 25,
+      priority: "high",
     });
 
     expect(
@@ -188,7 +210,7 @@ describe("Jira settle", () => {
       state: "Done",
       stateCategory: "Done",
       stateDone: true,
-      priority: 25,
+      priority: "high",
     });
   });
 
@@ -200,15 +222,19 @@ describe("Jira settle", () => {
     expect(jira.requests.some((request) => request.method === "POST")).toBe(false);
   });
 
-  it("refuses a status with no transition, a priority Jira lacks, and a non-issue", async () => {
+  it("refuses a status with no transition, an unknown priority level, and a non-issue", async () => {
     fakeJira({ "ABC-7": issueInProgress() });
 
     await expect(
       writeJiraSettle(buildConnection(), { sourceId: sourceId("ABC-7"), state: "Blocked" }),
     ).rejects.toThrow('Jira has no transition from "In Progress" to "Blocked" for ABC-7.');
     await expect(
-      writeJiraSettle(buildConnection(), { sourceId: sourceId("ABC-7"), priority: 30 }),
-    ).rejects.toThrow("Jira has no priority for the value 30.");
+      writeJiraSettle(buildConnection(), {
+        sourceId: sourceId("ABC-7"),
+        // Ajour validates the level, but the request still crosses a process boundary.
+        priority: "critical" as ConnectorPriorityLevel,
+      }),
+    ).rejects.toThrow('"critical" is not an Ajour priority level.');
     await expect(
       writeJiraSettle(buildConnection(), { sourceId: `${BASE}/projects/ABC`, state: "Done" }),
     ).rejects.toThrow("is not a Jira issue");
