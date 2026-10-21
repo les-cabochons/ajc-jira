@@ -1,4 +1,6 @@
 import type {
+  BacklogReadDescriptionRequest,
+  BacklogWriteDescriptionRequest,
   ConnectorFieldValues,
   ConnectorPluginConnection,
   ConnectorSettleStatesRequest,
@@ -12,6 +14,8 @@ import {
   validateJiraConnection,
 } from "./jira.js";
 import { listJiraSettleStates, writeJiraSettle } from "./settle.js";
+import { readJiraDescription } from "./description-source.js";
+import { writeJiraDescription } from "./description-write.js";
 
 const TASK_ICON_DISPLAY_MODES = new Set(["always", "fallback", "never"]);
 
@@ -87,6 +91,22 @@ export async function syncConnection(
 ) {
   const jiraConfig = buildJiraConfig(connection.config, connection);
   return await syncJiraConnection(jiraConfig, workItems);
+}
+
+/** The issue's current description, read when the user edits it in Ajour. */
+export async function readDescription(
+  connection: ConnectorPluginConnection,
+  request: BacklogReadDescriptionRequest,
+) {
+  return await readJiraDescription(buildJiraConfig(connection.config, connection), request);
+}
+
+/** Writes the user's edit, unless the issue's description changed since it was read. */
+export async function writeDescription(
+  connection: ConnectorPluginConnection,
+  request: BacklogWriteDescriptionRequest,
+) {
+  return await writeJiraDescription(buildJiraConfig(connection.config, connection), request);
 }
 
 export async function listSettleStates(

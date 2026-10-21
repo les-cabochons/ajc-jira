@@ -68,6 +68,21 @@ describe("connector manifest packaging contract", () => {
     expect(() => assertConnectorPluginManifest(badSettle)).toThrow(/settle/);
   });
 
+  it("declares description writes with Jira's limit, and rejects an invalid description capability", () => {
+    expect(validManifest.capabilities.connector.description).toEqual({ write: true, maxLength: 32767 });
+
+    for (const description of [true, { write: "yes" }, { maxLength: 0 }, { maxLength: 1.5 }, { maxLength: 10_000_001 }]) {
+      const manifest = cloneManifest();
+      manifest.capabilities.connector.description = description;
+      expect(() => assertConnectorPluginManifest(manifest)).toThrow(/description/);
+    }
+  });
+
+  it("says in the API token's help which permission writing needs", () => {
+    const apiToken = validManifest.connectionFields.find((field: { id: string }) => field.id === "apiToken");
+    expect(apiToken.helpText).toMatch(/Edit issues/);
+  });
+
   it("declares API version 3 with no priority scale, since the plugin maps priorities itself", () => {
     expect(validManifest.apiVersion).toBe(3);
     expect(validManifest.capabilities.connector).not.toHaveProperty("priorityScale");
