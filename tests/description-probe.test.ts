@@ -405,7 +405,6 @@ describe("generated descriptions", () => {
     expect(checked).toBeGreaterThan(1000);
     expect(refused).toBeLessThan(checked / 5);
     // Deleting or editing among twins that differ only in ids happens often enough to mean something.
-`);
     expect(twinCases).toBeGreaterThan(10);
   }, 60_000);
 
