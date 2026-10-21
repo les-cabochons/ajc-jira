@@ -411,9 +411,15 @@ function paragraphToAdf(nodes: AdfOutNode[], container: Container): AdfOutNode[]
   const isSpace = (node: AdfOutNode) =>
     node.type === "hardBreak" || (node.type === "text" && !node.marks && !node.text!.trim());
   const blocks = nodes.filter((node) => !isSpace(node));
+  // An image on the web with an address the link policy refuses is no media:
+  // the paragraph is written as text, as the same image inline would be.
   const alone =
     blocks.length > 0 &&
-    blocks.every((node) => node.type === IMAGE && !imageParams(node).params.has("inline"));
+    blocks.every((node) => {
+      if (node.type !== IMAGE) return false;
+      const { base, params } = imageParams(node);
+      return !params.has("inline") && (params.has("id") || isSafeUrl(base));
+    });
   if (!alone) return [withContent({ type: "paragraph" }, resolveImages(nodes))];
 
   const out: AdfOutNode[] = [];

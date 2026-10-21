@@ -412,6 +412,62 @@ describe("writeDescription", () => {
     );
   });
 
+  it.each([
+    ["javascript:alert(1)"],
+    ["JavaScript:alert(1)"],
+    ["data:image/svg+xml;base64,PHN2Zz48L3N2Zz4="],
+    ["vbscript:msgbox(1)"],
+    ["&#106;avascript:alert(1)"],
+  ])("writes a standalone image with an unsafe address %s as its text, as inline", async (url) => {
+    const puts = stubJira({ description: doc(paragraph(text("Old"))) });
+
+    await writeDescription(connection, { sourceId: SOURCE_ID, text: `![x](${url})`, expected: "Old" });
+    expect(writtenDescription(puts)).toEqual(doc(paragraph(text("x"))));
+    expect(JSON.stringify(puts)).not.toMatch(/javascript:|data:|vbscript:/i);
+  });
+
+  it("keeps a safe image among unsafe ones as a link, and the unsafe one as text", async () => {
+    const puts = stubJira({ description: doc(paragraph(text("Old"))) });
+
+    await writeDescription(connection, {
+      sourceId: SOURCE_ID,
+      text: "![a](https://img.example/a.png)\n![b](javascript:alert(1))",
+      expected: "Old",
+    });
+    expect(writtenDescription(puts)).toEqual(
+      doc(paragraph(text("a", [{ type: "link", attrs: { href: "https://img.example/a.png" } }]), { type: "hardBreak" }, text("b"))),
+    );
+  });
+
+  it("writes a standalone image with a web address as external media", async () => {
+    const puts = stubJira({ description: doc(paragraph(text("Old"))) });
+
+    await writeDescription(connection, { sourceId: SOURCE_ID, text: "![x](https://img.example/a.png)", expected: "Old" });
+    expect(writtenDescription(puts)).toEqual(
+      doc({
+        type: "mediaSingle",
+        attrs: { layout: "center" },
+        content: [{ type: "media", attrs: { type: "external", url: "https://img.example/a.png", alt: "x" } }],
+      }),
+    );
+  });
+
+  it("writes a standalone Jira file image by its media id, whatever its address", async () => {
+    const puts = stubJira({ description: doc(paragraph(text("Old"))) });
+
+    await writeDescription(connection, {
+      sourceId: SOURCE_ID,
+      text: `![a.png](${SOURCE_ID}#ajour-media?id=f1&collection=)\n\n![b.png](javascript:void(0)#ajour-media?id=f2&collection=)`,
+      expected: "Old",
+    });
+    expect(writtenDescription(puts)).toEqual(
+      doc(
+        { type: "mediaSingle", attrs: { layout: "center" }, content: [{ type: "media", attrs: { type: "file", id: "f1", collection: "", alt: "a.png" } }] },
+        { type: "mediaSingle", attrs: { layout: "center" }, content: [{ type: "media", attrs: { type: "file", id: "f2", collection: "", alt: "b.png" } }] },
+      ),
+    );
+  });
+
   it("lets a hard break with an id go when the user splits its paragraph at it", async () => {
     const first = { type: "hardBreak", attrs: { localId: "break-1", text: "\n" } };
     const second = { type: "hardBreak", attrs: { localId: "break-2", text: "\n" } };
