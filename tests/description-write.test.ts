@@ -383,6 +383,63 @@ describe("writeDescription", () => {
     expect(writtenDescription(puts)).toEqual(doc(paragraph(text("a"), lineBreak, text("b"), { type: "hardBreak" }, text("c"))));
   });
 
+  it("keeps a hard break exactly when the line before it changes", async () => {
+    const lineBreak = { type: "hardBreak", attrs: { text: "\n", localId: "break-1" } };
+    const puts = stubJira({ description: doc(paragraph(text("a"), lineBreak, text("b"))) });
+
+    await writeDescription(connection, { sourceId: SOURCE_ID, text: "A\nb", expected: "a\nb" });
+    expect(writtenDescription(puts)).toEqual(doc(paragraph(text("A"), lineBreak, text("b"))));
+  });
+
+  it("keeps hard breaks in order when the lines on both sides change and their count stays", async () => {
+    const lineBreak = { type: "hardBreak", attrs: { text: "\n", localId: "break-1" } };
+    const puts = stubJira({ description: doc(paragraph(text("a"), lineBreak, text("b"))) });
+
+    await writeDescription(connection, { sourceId: SOURCE_ID, text: "A\nB", expected: "a\nb" });
+    expect(writtenDescription(puts)).toEqual(doc(paragraph(text("A"), lineBreak, text("B"))));
+  });
+
+  it("writes nothing when a hard break with an id cannot be placed among changed lines", async () => {
+    const lineBreak = { type: "hardBreak", attrs: { text: "\n", localId: "break-1" } };
+    const puts = stubJira({ description: doc(paragraph(text("a"), lineBreak, text("b"))) });
+
+    await expect(
+      writeDescription(connection, { sourceId: SOURCE_ID, text: "A\nB\nC", expected: "a\nb" }),
+    ).rejects.toThrow("line break");
+    expect(puts).toEqual([]);
+  });
+
+  it("keeps an empty paragraph with an id between a changed block and a kept one", async () => {
+    const gap = { type: "paragraph", attrs: { localId: "g1" } };
+    const kept = { type: "paragraph", attrs: { localId: "p2" }, content: [text("Kept")] };
+    const puts = stubJira({ description: doc({ type: "paragraph", attrs: { localId: "p1" }, content: [text("Old")] }, gap, kept) });
+
+    await writeDescription(connection, { sourceId: SOURCE_ID, text: "New\n\nKept", expected: "Old\n\nKept" });
+    expect(writtenDescription(puts)).toEqual(
+      doc({ type: "paragraph", attrs: { localId: "p1" }, content: [text("New")] }, gap, kept),
+    );
+  });
+
+  it("keeps the mention its paragraph still holds when the same person's mention elsewhere goes", async () => {
+    const mention = (accessLevel: string, localId: string) => ({
+      type: "mention",
+      attrs: { id: "557058:ana", text: "@Ana", accessLevel, userType: "DEFAULT", localId },
+    });
+    const reviewer = mention("CONTAINER", "m2");
+    const puts = stubJira({
+      description: doc(paragraph(text("Owner "), mention("", "m1")), paragraph(text("Reviewer "), reviewer)),
+    });
+
+    await writeDescription(connection, {
+      sourceId: SOURCE_ID,
+      text: "Owner unassigned\n\nReviewer [@Ana](mention:557058:ana) please",
+      expected: "Owner [@Ana](mention:557058:ana)\n\nReviewer [@Ana](mention:557058:ana)",
+    });
+    expect(writtenDescription(puts)).toEqual(
+      doc(paragraph(text("Owner unassigned")), paragraph(text("Reviewer "), reviewer, text(" please"))),
+    );
+  });
+
   it("writes code-block twins that differ only in uniqueId with no id twice", async () => {
     const code = (uniqueId: string) => ({ type: "codeBlock", attrs: { language: "js", uniqueId }, content: [text("x")] });
     const puts = stubJira({ description: doc(code("A"), code("B")) });

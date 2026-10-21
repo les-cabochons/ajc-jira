@@ -178,15 +178,9 @@ export function patchDescriptionAdf(source: unknown, markdown: string, context: 
     placed.forEach((place, index) => {
       if (place) keptAt.set(place.start, index);
     });
-    const out: unknown[] = content.slice(0, parts[0]!.index);
-    const pieces: string[] = [];
+    type Piece = { nodes: unknown[]; text: string; part?: number; blankGap?: number };
+    const pieces: Piece[] = [];
     let pendingGap: number | undefined;
-    const push = (nodes: unknown[], text: string) => {
-      if (pendingGap !== undefined && pieces.length > 0) out.push(...gapNodes(pendingGap));
-      pendingGap = undefined;
-      out.push(...nodes);
-      pieces.push(text);
-    };
     for (let line = 0; line < after.length; ) {
       if (isBlank(after[line])) {
         pendingGap ??= gapAfterLine.get(line);
@@ -195,7 +189,8 @@ export function patchDescriptionAdf(source: unknown, markdown: string, context: 
       }
       const index = keptAt.get(line);
       if (index !== undefined) {
-        push([content[parts[index]!.index]], parts[index]!.markdown);
+        pieces.push({ nodes: [content[parts[index]!.index]], text: parts[index]!.markdown, part: index, blankGap: pendingGap });
+        pendingGap = undefined;
         line = placed[index]!.end;
         continue;
       }
@@ -203,11 +198,38 @@ export function patchDescriptionAdf(source: unknown, markdown: string, context: 
       const start = line;
       while (line < after.length && !keptAt.has(line) && !(splitAtGaps && gapAfterLine.has(line))) line += 1;
       const text = after.slice(start, line).join("\n");
-      push(markdownToAdf(text).content, text);
+      pieces.push({ nodes: markdownToAdf(text).content, text, blankGap: pendingGap });
+      pendingGap = undefined;
     }
+
+    // The empty lines between two source blocks, by their boundaries: right
+    // after the kept block before them, else right before the kept block
+    // after them, else where their blank line stayed.
+    // Two such gaps can meet at one place, as when the block between them
+    // goes: the one after the kept block comes first.
+    const gapAt = Array.from({ length: pieces.length + 1 }, () => [] as number[]);
+    const usedGaps = new Set<number>();
+    const place = (at: number, gap: number, onlyIfFree = false) => {
+      if (gap < 0 || gap >= parts.length - 1 || usedGaps.has(gap)) return;
+      if (onlyIfFree && gapAt[at]!.length > 0) return;
+      // Two blocks with nothing between them leave the place free.
+      if (gapNodes(gap).length === 0) return;
+      gapAt[at]!.push(gap);
+      usedGaps.add(gap);
+    };
+    pieces.forEach((piece, at) => piece.part !== undefined && place(at + 1, piece.part));
+    pieces.forEach((piece, at) => piece.part !== undefined && place(at, piece.part - 1));
+    pieces.forEach((piece, at) => at > 0 && piece.blankGap !== undefined && place(at, piece.blankGap, true));
+
+    const out: unknown[] = content.slice(0, parts[0]!.index);
+    for (const gap of gapAt[0]!) out.push(...gapNodes(gap));
+    pieces.forEach((piece, at) => {
+      out.push(...piece.nodes);
+      for (const gap of gapAt[at + 1]!) out.push(...gapNodes(gap));
+    });
     out.push(...content.slice(parts[parts.length - 1]!.index + 1));
     const document: AdfDocument = { type: "doc", version: 1, content: out as AdfOutNode[] };
-    return { document, pieces };
+    return { document, pieces: pieces.map((piece) => piece.text) };
   };
 
   for (;;) {

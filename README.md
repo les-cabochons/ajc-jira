@@ -119,9 +119,17 @@ one GET of its description and attachments.
   node written otherwise must lose only what the user allowed; anything else
   writes nothing.
 - The write keeps each node that reads the same as a source node, wherever it
-  now stands: a mention in a paragraph turned heading, list item or quote, and
-  each existing hard break between the same two lines when lines are added or
-  deleted around it.
+  now stands: a mention in a paragraph turned heading, list item or quote.
+- A hard break or an empty paragraph has no Markdown of its own, so it is
+  told by its boundaries, in the write and, separately, in the check. A hard
+  break stays the break after its line, or before the next line, when that
+  line is kept and still has a break on that side; an empty block likewise
+  next to a kept block, and at the start or the end of its block. The rest
+  pair in order when as many are left on each side. A source one left over
+  that carries an id or attributes cannot be placed, and nothing is written.
+- A mention, inline file or smart link is resolved by the line or the block
+  that holds it before twins are judged, so two mentions of one person in
+  different paragraphs never stand in each other's way.
 - Nodes that read the same and differ only in their ids (`localId`,
   `uniqueId`) are twins no reader can tell apart: when some are deleted, the
   write keeps the earliest of them, in document order, each a real source
