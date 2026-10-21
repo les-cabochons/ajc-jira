@@ -4,8 +4,7 @@ import {
   AMBIGUOUS_EDIT,
   alignLines,
   reconcileDocument,
-  rebuiltNested,
-  withoutIds,
+  restoreKeptNodes,
 } from "./description-nested.js";
 
 export { AMBIGUOUS_EDIT };
@@ -100,15 +99,20 @@ export function patchDescriptionAdf(source: unknown, markdown: string, context: 
     return { start: first, end: first + (end - start) };
   });
 
-  // Parts that read the same, and whether their ADF differs beyond ids.
+  // Parts that read the same, and whether their ADF differs, ids included:
+  // which of two twins with their own ids survived is as open as any.
   const groups = new Map<string, number[]>();
   parts.forEach((part, index) => groups.set(part.markdown, [...(groups.get(part.markdown) ?? []), index]));
   const differs = (members: number[]) =>
-    new Set(members.map((index) => withoutIds(content[parts[index]!.index]))).size > 1;
-  for (const members of groups.values()) {
+    new Set(members.map((index) => JSON.stringify(content[parts[index]!.index]))).size > 1;
+  const editedBlocks = JSON.parse(target) as string[];
+  for (const [text, members] of groups) {
     if (members.length < 2 || !differs(members)) continue;
-    // Without a full diff, which of them stayed is unknown.
-    if (!aligned) throw new Error(AMBIGUOUS_EDIT);
+    // Without a full diff, or with fewer of them left, which stayed is unknown.
+    const reads = blocksOf(text, context).join("\n\n");
+    if (!aligned || editedBlocks.filter((block) => block === reads).length < members.length) {
+      throw new Error(AMBIGUOUS_EDIT);
+    }
     for (const index of members) {
       const { start, end } = spans[index]!;
       for (let line = start; line < end; line += 1) {
@@ -154,10 +158,9 @@ export function patchDescriptionAdf(source: unknown, markdown: string, context: 
   const reconcile = (document: AdfDocument): AdfDocument => {
     const reconciled = {
       ...document,
-      content: reconcileDocument(
+      content: restoreKeptNodes(
         content,
-        parts.map((part) => content[part.index]!),
-        document.content as AdfNode[],
+        reconcileDocument(content, parts.map((part) => content[part.index]!), document.content as AdfNode[], context),
         context,
       ) as AdfOutNode[],
     };
@@ -214,7 +217,7 @@ export function patchDescriptionAdf(source: unknown, markdown: string, context: 
     }
     if (placed.every((place) => !place)) return reconcile(build(false).document);
     // The kept blocks next to changed text join it, and the write is tried
-    // again. `rebuiltBlocks` then tells the write which source blocks went.
+    // again. The write's guard then checks what went.
     const kept = new Set<number>();
     for (const place of placed) {
       for (let line = place?.start ?? 0; place && line < place.end; line += 1) kept.add(line);
@@ -241,55 +244,4 @@ export function patchDescriptionAdf(source: unknown, markdown: string, context: 
     }
     if (!unkept) placed.fill(undefined);
   }
-}
-
-/**
- * The source's nodes whose Markdown the edit kept but which the written ADF
- * does not hold as they were, ids and attributes included. A top-level block
- * counts as kept as many times as the edit, read whole, still holds its
- * Markdown as a block, and as present as many times as the written ADF holds
- * a block deep-equal to it. Below, see `rebuiltNested`.
- */
-export function rebuiltBlocks(
-  source: unknown,
-  written: { content: unknown[] },
-  markdown: string,
-  context: AdfImageContext,
-): AdfNode[] {
-  const read = adfToMarkdownParts(source, context);
-  if (!read || read.parts.length === 0) return [];
-  const edited = blocksOf(editedLines(markdown).join("\n"), context);
-  const writtenJson = written.content.map((node) => JSON.stringify(node));
-  const used = new Set<number>();
-  const byKey = new Map<string, AdfNode[]>();
-  for (const part of read.parts) {
-    const key = JSON.stringify(blocksOf(part.markdown, context));
-    byKey.set(key, [...(byKey.get(key) ?? []), read.content[part.index]!]);
-  }
-  const rebuilt: AdfNode[] = [];
-  for (const [key, nodes] of byKey) {
-    const blocks = JSON.parse(key) as string[];
-    if (blocks.length === 0) continue;
-    // How many times the edit still holds these blocks, one after another.
-    let kept = 0;
-    for (let at = 0; at + blocks.length <= edited.length; at += 1) {
-      if (blocks.every((block, offset) => edited[at + offset] === block)) {
-        kept += 1;
-        at += blocks.length - 1;
-      }
-    }
-    const missing: AdfNode[] = [];
-    for (const node of nodes) {
-      const json = JSON.stringify(node);
-      const found = writtenJson.findIndex((candidate, index) => !used.has(index) && candidate === json);
-      if (found === -1) missing.push(node);
-      else used.add(found);
-    }
-    const present = nodes.length - missing.length;
-    rebuilt.push(...missing.slice(0, Math.max(0, Math.min(nodes.length, kept) - present)));
-  }
-  // Below the top level, in every block the write rebuilt.
-  const parts = read.parts.map((part) => read.content[part.index]!);
-  rebuilt.push(...rebuiltNested(read.content, parts, written.content as AdfNode[], context));
-  return [...new Set(rebuilt)];
 }

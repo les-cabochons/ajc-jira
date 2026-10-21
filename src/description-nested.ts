@@ -6,7 +6,8 @@ import { adfToMarkdown, type AdfImageContext, type AdfNode } from "./adf-markdow
 // reads the same is the source child itself, ids and attributes included, and
 // a changed child that lines up with one source child takes over that child's
 // ids and the attributes Markdown has no place for, down to the mentions, inline
-// files and smart links of its text. The same alignment checks the result.
+// files and smart links of its text. The write then checks the result with
+// description-guard.ts, which shares none of this alignment.
 
 /** Past this many pairs, a diff costs too much. */
 const MAX_DIFF_CELLS = 4_000_000;
@@ -78,10 +79,6 @@ export function alignLines(before: string[], after: string[]) {
   return { match, certain, optional };
 }
 
-/** A node as JSON without the ids that only name it. */
-export function withoutIds(node: unknown): string {
-  return JSON.stringify(node, (key, value) => (key === "localId" ? undefined : value));
-}
 
 /** A document that holds only `node`, as the reader reads it where it stands. */
 export function documentOf(node: AdfNode): AdfNode {
@@ -162,10 +159,6 @@ function carryAttributes(source: AdfNode, rebuilt: AdfNode): AdfNode {
   return result;
 }
 
-/** The neutral attributes a node must keep through a rebuild. */
-function neutralAttributes(node: AdfNode) {
-  return Object.entries(node.attrs ?? {}).filter(([name, value]) => isNeutralAttribute(node.type, name, value));
-}
 
 function childrenOf(node: AdfNode): AdfNode[] {
   return Array.isArray(node.content) ? (node.content as AdfNode[]) : [];
@@ -190,15 +183,35 @@ function pairChildren(sources: AdfNode[], written: AdfNode[], context: AdfImageC
   sources.forEach((_, index) => {
     const uncertain = aligned.optional[index] || (aligned.match[index]! >= 0 && !aligned.certain[index]);
     const group = groups.get(sourceKeys[index]!)!;
-    if (uncertain && group.length > 1 && new Set(group.map(withoutIds)).size > 1) throw new Error(AMBIGUOUS_EDIT);
+    const differs = group.length > 1 && new Set(group.map((node) => JSON.stringify(node))).size > 1;
+    // Fewer of them left than there were: which survived is open.
+    const left = writtenKeys.filter((key) => key === sourceKeys[index]).length;
+    if (differs && (uncertain || left < group.length)) throw new Error(AMBIGUOUS_EDIT);
   });
 
   const pairs: Pair[] = [];
+  // A child the user moved without changing it reads the same in another
+  // place: it pairs when its Markdown is unique among the unpaired children on
+  // both sides, before any guess about changed children.
+  const matchedWritten = new Set(aligned.match.filter((at) => at >= 0));
+  const unpairedSources = sources.map((_, index) => index).filter((index) => aligned.match[index] === -1);
+  const unpairedWritten = written.map((_, index) => index).filter((index) => !matchedWritten.has(index));
+  const moved = new Set<AdfNode>();
+  for (const index of unpairedSources) {
+    const key = sourceKeys[index]!;
+    const sameSource = unpairedSources.filter((other) => sourceKeys[other] === key);
+    const sameWritten = unpairedWritten.filter((other) => writtenKeys[other] === key);
+    if (sameSource.length === 1 && sameWritten.length === 1) {
+      pairs.push({ source: sources[index]!, written: written[sameWritten[0]!]!, same: true });
+      moved.add(sources[index]!);
+      moved.add(written[sameWritten[0]!]!);
+    }
+  }
   let sourceAt = 0;
   let writtenAt = 0;
   const pairRun = (sourceEnd: number, writtenEnd: number) => {
-    const sourceRun = sources.slice(sourceAt, sourceEnd);
-    const writtenRun = written.slice(writtenAt, writtenEnd);
+    const sourceRun = sources.slice(sourceAt, sourceEnd).filter((node) => !moved.has(node));
+    const writtenRun = written.slice(writtenAt, writtenEnd).filter((node) => !moved.has(node));
     if (sourceRun.length === writtenRun.length && sourceRun.every((node, index) => node.type === writtenRun[index]!.type)) {
       sourceRun.forEach((node, index) => pairs.push({ source: node, written: writtenRun[index]!, same: false }));
       return;
@@ -237,19 +250,41 @@ function atomIdentity(node: AdfNode): string | undefined {
 }
 
 /**
- * Pairs the inline atoms of a rebuilt run of text with the source's: by id or
- * address, and hard breaks in order when there are as many.
+ * Pairs the inline atoms of a rebuilt run of text with the source's, person
+ * by person, file by file: first those that read exactly the same, in order;
+ * then a renamed one with the one source atom left. When which survived, or
+ * which was renamed, is open and the source atoms differ, the edit is
+ * ambiguous. Hard breaks pair in order when there are as many.
  */
 function pairAtoms(sources: AdfNode[], written: AdfNode[], context: AdfImageContext): Pair[] {
   const pairs: Pair[] = [];
-  const used = new Set<AdfNode>();
-  for (const node of written) {
-    const identity = atomIdentity(node);
-    if (!identity) continue;
-    const source = sources.find((candidate) => !used.has(candidate) && atomIdentity(candidate) === identity);
-    if (!source) continue;
-    used.add(source);
-    pairs.push({ source, written: node, same: keyOf(source, context) === keyOf(node, context) });
+  const identities = new Set(written.map(atomIdentity).filter((identity) => identity !== undefined));
+  for (const identity of identities) {
+    const sourceAtoms = sources.filter((node) => atomIdentity(node) === identity);
+    const writtenAtoms = written.filter((node) => atomIdentity(node) === identity);
+    const used = new Set<AdfNode>();
+    for (const key of new Set(writtenAtoms.map((node) => keyOf(node, context)))) {
+      const sameSource = sourceAtoms.filter((node) => keyOf(node, context) === key);
+      const sameWritten = writtenAtoms.filter((node) => keyOf(node, context) === key);
+      if (sameWritten.length < sameSource.length && new Set(sameSource.map((node) => JSON.stringify(node))).size > 1) {
+        throw new Error(AMBIGUOUS_EDIT);
+      }
+      sameWritten.slice(0, sameSource.length).forEach((node, index) => {
+        pairs.push({ source: sameSource[index]!, written: node, same: true });
+        used.add(sameSource[index]!).add(node);
+      });
+    }
+    const leftSource = sourceAtoms.filter((node) => !used.has(node));
+    const leftWritten = writtenAtoms.filter((node) => !used.has(node));
+    if (leftSource.length === 0 || leftWritten.length === 0) continue;
+    // Renamed: a changed atom, so free, but it keeps its source's attributes
+    // when which source atom it was is plain: as many on each side, and one,
+    // or all agreeing on what a rename keeps. Otherwise nothing is carried.
+    const kept = (node: AdfNode) =>
+      JSON.stringify(Object.entries(node.attrs ?? {}).filter(([name]) => name !== "text" && name !== "localId"));
+    if (leftSource.length !== leftWritten.length) continue;
+    if (leftSource.length > 1 && new Set(leftSource.map(kept)).size > 1) continue;
+    leftWritten.forEach((node, index) => pairs.push({ source: leftSource[index]!, written: node, same: false }));
   }
   const sourceBreaks = sources.filter((node) => node.type === "hardBreak");
   const writtenBreaks = written.filter((node) => node.type === "hardBreak");
@@ -277,6 +312,98 @@ export function reconcileNode(source: AdfNode, rebuilt: AdfNode, context: AdfIma
     replacement.set(pair.written, pair.same ? pair.source : reconcileNode(pair.source, pair.written, context));
   }
   result.content = written.map((node) => replacement.get(node) ?? node);
+  return result;
+}
+
+function nodeKey(node: AdfNode, path: string, context: AdfImageContext) {
+  return `${path}>${String(node.type)}\u0000${keyOf(node, context)}`;
+}
+
+/** A node and every node under it. */
+function subtree(node: AdfNode): AdfNode[] {
+  return [node, ...childrenOf(node).flatMap(subtree)];
+}
+
+/**
+ * The last pass of a rebuild: any written node that reads the same, where it
+ * stands, as a source node the write does not hold yet becomes that source
+ * node, ids and attributes included, wherever the alignment lost track of it,
+ * as a mention in two paragraphs the user joined. Nodes already written
+ * exactly are claimed first. When the source nodes it could be differ, the
+ * edit is ambiguous. Ids a rebuilt node took from a node restored here are
+ * dropped from it.
+ */
+export function restoreKeptNodes(source: AdfNode[], written: AdfNode[], context: AdfImageContext): AdfNode[] {
+  const candidates = new Map<string, AdfNode[]>();
+  const index = (node: AdfNode, path: string) => {
+    if (node.type !== "text" && keyOf(node, context) !== "") {
+      const key = nodeKey(node, path, context);
+      candidates.set(key, [...(candidates.get(key) ?? []), node]);
+    }
+    for (const child of childrenOf(node)) index(child, `${path}>${String(node.type)}`);
+  };
+  source.forEach((node) => index(node, "doc"));
+  const used = new Set<AdfNode>();
+  const claim = (node: AdfNode) => subtree(node).forEach((each) => used.add(each));
+  const writtenExactly = new Set<AdfNode>();
+
+  // Exact copies first, outermost first.
+  const exact = (node: AdfNode, path: string) => {
+    if (node.type !== "text") {
+      const match = (candidates.get(nodeKey(node, path, context)) ?? []).find(
+        (candidate) => !used.has(candidate) && JSON.stringify(candidate) === JSON.stringify(node),
+      );
+      if (match) {
+        claim(match);
+        writtenExactly.add(node);
+        return;
+      }
+    }
+    for (const child of childrenOf(node)) exact(child, `${path}>${String(node.type)}`);
+  };
+  written.forEach((node) => exact(node, "doc"));
+
+  const restored: AdfNode[] = [];
+  const restore = (node: AdfNode, path: string): AdfNode => {
+    if (node.type === "text" || writtenExactly.has(node)) return node;
+    const free =
+      keyOf(node, context) === ""
+        ? []
+        : (candidates.get(nodeKey(node, path, context)) ?? []).filter((candidate) => !used.has(candidate));
+    if (free.length > 0) {
+      if (new Set(free.map((candidate) => JSON.stringify(candidate))).size > 1) throw new Error(AMBIGUOUS_EDIT);
+      claim(free[0]!);
+      restored.push(free[0]!);
+      return free[0]!;
+    }
+    const children = childrenOf(node);
+    if (children.length === 0) return node;
+    const content = children.map((child) => restore(child, `${path}>${String(node.type)}`));
+    return content.every((child, at) => child === children[at]) ? node : { ...node, content };
+  };
+  let result = written.map((node) => restore(node, "doc"));
+
+  // A rebuilt node keeps no id a restored node holds.
+  const restoredIds = new Set(
+    restored.flatMap(subtree).map((node) => node.attrs?.localId).filter((id) => typeof id === "string"),
+  );
+  if (restoredIds.size > 0) {
+    const restoredNodes = new Set(restored.flatMap(subtree));
+    const dropIds = (node: AdfNode): AdfNode => {
+      if (restoredNodes.has(node)) return node;
+      let next = node;
+      const id = node.attrs?.localId;
+      if (typeof id === "string" && restoredIds.has(id)) {
+        const { localId: _dropped, ...attrs } = node.attrs!;
+        next = { ...node, attrs };
+      }
+      const children = childrenOf(next);
+      if (children.length === 0) return next;
+      const content = children.map(dropIds);
+      return content.every((child, at) => child === children[at]) ? next : { ...next, content };
+    };
+    result = result.map(dropIds);
+  }
   return result;
 }
 
@@ -310,42 +437,4 @@ export function reconcileDocument(
     replacement.set(pair.written, pair.same ? pair.source : reconcileNode(pair.source, pair.written, context));
   }
   return written.map((node) => replacement.get(node) ?? node);
-}
-
-/**
- * The source nodes, below the top level, that a write should have kept as
- * they were and did not: a child that reads the same as its aligned source
- * child must be that child, deep-equal, and a changed child aligned with one
- * must keep its ids and neutral attributes.
- */
-export function rebuiltNested(
-  content: AdfNode[],
-  parts: AdfNode[],
-  written: AdfNode[],
-  context: AdfImageContext,
-): AdfNode[] {
-  const rebuilt: AdfNode[] = [];
-  const check = (source: AdfNode, result: AdfNode) => {
-    if (source.type !== result.type) return;
-    if (neutralAttributes(source).some(([name, value]) => result.attrs?.[name] !== value)) rebuilt.push(source);
-    const children = childrenOf(result);
-    const pairs = INLINE_CONTAINERS.has(String(result.type))
-      ? pairAtoms(childrenOf(source), children, context)
-      : pairChildren(childrenOf(source), children, context);
-    for (const pair of pairs) {
-      if (pair.same) {
-        if (JSON.stringify(pair.source) !== JSON.stringify(pair.written)) rebuilt.push(pair.source);
-      } else {
-        check(pair.source, pair.written);
-      }
-    }
-  };
-  for (const pair of pairTopLevel(content, parts, written, context)) {
-    if (pair.same) {
-      if (JSON.stringify(pair.source) !== JSON.stringify(pair.written)) rebuilt.push(pair.source);
-    } else {
-      check(pair.source, pair.written);
-    }
-  }
-  return rebuilt;
 }

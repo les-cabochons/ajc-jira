@@ -106,13 +106,20 @@ one GET of its description and attachments.
   the source child itself; a changed child keeps its ids and the attributes
   Markdown has no place for, and a mention, inline file or smart link in
   changed text keeps its source attributes.
-- A check runs on the result, at every depth: every source node whose
-  Markdown the edit kept must be in the write as it was, and a changed one
-  must keep its ids. One that is not must lose only what the user allowed, or
-  nothing is written.
-- Blocks that read the same but differ in Jira are kept only where every
-  optimal line alignment agrees on which one stayed; otherwise, as when one of
-  two is deleted, nothing is written and the error says to edit in Jira.
+- A check runs on the result that shares none of the patch's alignment. It
+  keys every node, at every depth, by where it stands, its kind and its
+  Markdown, and matches the written nodes to the source's, outermost first:
+  a written node whose key the source has must be one of those source nodes,
+  deep-equal, ids and attributes included, and a changed node may carry ids
+  and attributes only from a source node of its kind that did not survive. No
+  id is written twice. A kept node written otherwise must lose only what the
+  user allowed; anything else writes nothing.
+- Nodes that read the same but differ in Jira, ids included, are kept only
+  where every optimal alignment agrees on which one stayed. When fewer of them
+  are left than there were, as when one of two is deleted, which survived
+  cannot be told, and nothing is written; the error says to edit in Jira.
+- A child the user moved without changing it, inside a list or task list, is
+  kept as it was; so is a mention left when another of the same person goes.
 - Losses beyond the 20 names Ajour shows are checked too: such a description
   is never written.
 - A description longer than Jira's 32,767 characters, measured as the ADF's

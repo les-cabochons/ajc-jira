@@ -4,7 +4,8 @@ import type {
 } from "./contract.js";
 import { describeJiraDescriptionFully, MAX_LOST } from "./description.js";
 import { documentOf } from "./description-nested.js";
-import { patchDescriptionAdf, rebuiltBlocks } from "./description-patch.js";
+import { checkPreservation } from "./description-guard.js";
+import { patchDescriptionAdf } from "./description-patch.js";
 import { fetchDescribedIssue, requireIssueKey } from "./description-source.js";
 import { buildIssueUrl, describeIssue, requestJira, type JiraConnectionInput } from "./jira.js";
 import { markdownToAdf, type AdfDocument } from "./markdown-adf.js";
@@ -65,12 +66,17 @@ export async function writeJiraDescription(
   if (request.text.trim()) {
     const source = issue.fields?.description;
     description = isDocument(source) ? patchDescriptionAdf(source, request.text, context) : markdownToAdf(request.text);
-    // Every block whose Markdown the user left alone must be written as it
-    // was; one that is not loses only what the user allowed, or nothing goes.
-    for (const block of isDocument(source) ? rebuiltBlocks(source, description, request.text, context) : []) {
-      const blockLost =
-        describeJiraDescriptionFully(documentOf(block), context).lost ?? [];
-      if (blockLost.length === 0 || blockLost.some((loss) => !allowed.includes(loss))) {
+    // Checked against the source, independently of the patch: every node the
+    // user left alone, at any depth, must be written as it was; one that is
+    // not loses only what the user allowed, or nothing goes. No written node
+    // may hold ids or attributes it could not have.
+    if (isDocument(source)) {
+      const report = checkPreservation(source, description, context);
+      const unallowed = report.rebuilt.some((node) => {
+        const nodeLost = describeJiraDescriptionFully(documentOf(node), context).lost ?? [];
+        return nodeLost.length === 0 || nodeLost.some((loss) => !allowed.includes(loss));
+      });
+      if (report.invalid.length > 0 || unallowed) {
         throw new Error(
           "Ajour cannot write this edit without changing parts of the description you did not edit. Edit it in Jira.",
         );

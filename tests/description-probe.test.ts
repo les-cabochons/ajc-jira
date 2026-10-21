@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { adfToMarkdown, adfToMarkdownParts } from "../src/adf-markdown.ts";
-import { patchDescriptionAdf, rebuiltBlocks } from "../src/description-patch.ts";
+import { checkPreservation } from "../src/description-guard.ts";
+import { patchDescriptionAdf } from "../src/description-patch.ts";
 import { describeJiraDescription, NOT_WRITABLE_EXACTLY } from "../src/description.ts";
 import { markdownToAdf } from "../src/markdown-adf.ts";
 
@@ -130,23 +131,79 @@ function generate(next: () => number) {
   return { type: "doc", version: 1, content: Array.from({ length: 1 + Math.floor(next() * 4) }, () => block(0)) };
 }
 
+/** Every id a document holds, at every depth. */
+function everyId(value: { content?: unknown }) {
+  const ids: string[] = [];
+  const walk = (node: Node) => {
+    if (typeof node.attrs?.localId === "string") ids.push(node.attrs.localId);
+    (Array.isArray(node.content) ? (node.content as Node[]) : []).forEach(walk);
+  };
+  walk(value as Node);
+  return ids;
+}
+
 /** Gives every node an id, and mentions, cells and tables neutral attributes. */
-function decorate<T>(value: T): T {
+function decorate<T>(value: T, next: () => number = () => 0): T {
   let count = 0;
   const walk = (node: Node): Node => {
     const copy: Node = { ...node };
+    // Some lists hold an item twice: identical, or with an id of its own.
+    if (Array.isArray(node.content) && ["bulletList", "orderedList", "taskList"].includes(String(node.type)) && next() < 0.3) {
+      const at = Math.floor(next() * node.content.length);
+      copy.content = [...node.content.slice(0, at + 1), node.content[at], ...node.content.slice(at + 1)];
+    }
     if (node.type !== "text" && node.type !== "doc") {
-      const attrs: Record<string, unknown> = { ...(node.attrs ?? {}), localId: `n${(count += 1)}` };
-      if (node.type === "mention") Object.assign(attrs, { accessLevel: "CONTAINER", userType: "DEFAULT" });
+      const attrs: Record<string, unknown> = { ...(node.attrs ?? {}) };
+      // Most nodes have an id; those without make identical twins.
+      if (node.type === "taskList" || node.type === "taskItem" || next() < 0.8) attrs.localId = `n${(count += 1)}`;
+      if (node.type === "mention") {
+        // The same person mentioned with different attributes.
+        Object.assign(attrs, { accessLevel: ["", "CONTAINER"][Math.floor(next() * 2)], userType: ["DEFAULT", "APP"][Math.floor(next() * 2)] });
+      }
       if (node.type === "tableHeader" || node.type === "tableCell") Object.assign(attrs, { colspan: 1, rowspan: 1 });
       if (node.type === "table") Object.assign(attrs, { isNumberColumnEnabled: false, layout: "center", width: 760 });
       if (node.type === "hardBreak") Object.assign(attrs, { text: "\n" });
-      copy.attrs = attrs;
+      if (Object.keys(attrs).length > 0 || node.attrs) copy.attrs = attrs;
     }
-    if (Array.isArray(node.content)) copy.content = node.content.map(walk);
+    if (Array.isArray(copy.content)) copy.content = copy.content.map(walk);
     return copy;
   };
   return walk(value as Node) as T;
+}
+
+/** The top-level item lines of a list, by index. */
+function itemLines(lines: string[]) {
+  return lines.map((line, index) => ({ line, index })).filter(({ line }) => /^(?:- |\d+\. )/.test(line));
+}
+
+/** Swaps two neighbouring single-line items of a list. */
+function swapItems(markdown: string, pick: number) {
+  const lines = markdown.split("\n");
+  const items = itemLines(lines).filter(({ index }) => /^(?:- |\d+\. )/.test(lines[index + 1] ?? ""));
+  if (items.length === 0) return markdown;
+  const { index } = items[Math.floor(pick * items.length)]!;
+  const marker = (line: string) => /^(?:- \[[ x]\] |- |\d+\. )/.exec(line)![0];
+  const [first, second] = [lines[index]!, lines[index + 1]!];
+  // Ordered lists keep their numbers; the items move.
+  lines[index] = marker(first) + second.slice(marker(second).length);
+  lines[index + 1] = marker(second) + first.slice(marker(first).length);
+  return lines.join("\n");
+}
+
+/** Deletes or duplicates one single-line item of a list. */
+function dropOrCopyItem(markdown: string, pick: number, copy: boolean) {
+  const lines = markdown.split("\n");
+  const items = itemLines(lines).filter(({ index }) => !/^\s/.test(lines[index + 1] ?? ""));
+  if (items.length < 2) return markdown;
+  const { index } = items[Math.floor(pick * items.length)]!;
+  if (copy) lines.splice(index, 0, lines[index]!);
+  else lines.splice(index, 1);
+  return lines.join("\n");
+}
+
+/** Deletes the first mention on a line that has one. */
+function dropMention(markdown: string) {
+  return markdown.replace(/\[@[^\]]*\]\(mention:[^)]*\)/, "");
 }
 
 /** Changes one line inside a block: a table row's last cell, or the line's end. */
@@ -183,7 +240,7 @@ describe("generated descriptions", () => {
     expect(failures).toEqual([]);
     // Enough of them name no loss for the check to mean something.
     expect(unchanged).toBeGreaterThan(300);
-  });
+  }, 60_000);
 
   it("keep every block and empty line an edit leaves alone, and read back as the edit", () => {
     const failures: unknown[] = [];
@@ -214,7 +271,7 @@ describe("generated descriptions", () => {
       if (gaps(written.content) !== gaps(source.content)) failures.push({ seed, kind: "gaps", markdown });
     }
     expect(failures).toEqual([]);
-  });
+  }, 60_000);
 
   it("read back as the edit, whatever the edit, when the description writes back as itself", () => {
     const failures: unknown[] = [];
@@ -232,16 +289,22 @@ describe("generated descriptions", () => {
       // Edits inside a block: a table cell, a list or task item, a quote's line.
       (parts: string[], at: number, pick: number) => parts.map((part, index) => (index === at ? editLine(part, pick) : part)),
       (parts: string[], at: number, pick: number) => parts.map((part, index) => (index === at ? editLine(part, pick) : part)),
-      (parts: string[], at: number, pick: number) => parts.map((part, index) => (index === at ? editLine(part, pick) : part)),
+      // Reorders, deletions and copies among a list's items, twins included,
+      // and a deleted mention beside others of the same person.
+      (parts: string[], at: number, pick: number) => parts.map((part, index) => (index === at ? swapItems(part, pick) : part)),
+      (parts: string[], at: number, pick: number) => parts.map((part, index) => (index === at ? swapItems(part, pick) : part)),
+      (parts: string[], at: number, pick: number) => parts.map((part, index) => (index === at ? dropOrCopyItem(part, pick, false) : part)),
+      (parts: string[], at: number, pick: number) => parts.map((part, index) => (index === at ? dropOrCopyItem(part, pick, true) : part)),
+      (parts: string[], at: number) => parts.map((part, index) => (index === at ? dropMention(part) : part)),
     ];
     let refused = 0;
     let checked = 0;
-    for (let seed = 1; seed <= 3000 && failures.length < 4; seed += 1) {
+    for (let seed = 1; seed <= 4000 && failures.length < 4; seed += 1) {
       const next = random(seed);
-      // Every node has its own id, and mentions, cells and tables the
+      // Most nodes have their own id, and mentions, cells and tables the
       // attributes Markdown has no place for, so keeping a node means keeping
       // that very node.
-      const value = decorate(generate(next));
+      const value = decorate(generate(next), next);
       const source = { ...value, content: value.content.flatMap((node) => (next() < 0.3 ? [{ type: "paragraph" }, node] : [node])) };
       if (describeJiraDescription(source, context).lost?.includes(NOT_WRITABLE_EXACTLY)) continue;
       const read = adfToMarkdownParts(source, context)!;
@@ -262,22 +325,50 @@ describe("generated descriptions", () => {
       if ((adfToMarkdown(written, context) ?? "") !== expected) {
         failures.push({ seed, kind: "reads", markdown, expected, written: adfToMarkdown(written, context) });
       }
-      // The source-level guard, at every depth: every node whose Markdown the
+      // The independent guard, at every depth: every node whose Markdown the
       // edit kept is in the write as its very source ADF, ids and attributes
-      // included, and a changed node keeps its ids.
-      const rebuilt = rebuiltBlocks(source, written, markdown, context);
-      if (rebuilt.length > 0) failures.push({ seed, kind: "rebuilt", markdown, rebuilt: JSON.stringify(rebuilt) });
+      // included; changed nodes carry only what a gone source node had; no
+      // written node shares an id with another.
+      let report;
+      try {
+        report = checkPreservation(source, written, context);
+      } catch (error) {
+        failures.push({ seed, kind: "guard refused what the patch wrote", markdown, error: String(error) });
+        continue;
+      }
+      if (report.rebuilt.length > 0 || report.invalid.length > 0) {
+        failures.push({ seed, kind: "guard", markdown, rebuilt: JSON.stringify(report.rebuilt), invalid: JSON.stringify(report.invalid) });
+      }
+      const ids = everyId(written);
+      if (new Set(ids).size !== ids.length) failures.push({ seed, kind: "shared id", markdown, ids });
     }
     expect(failures).toEqual([]);
-    expect(refused).toBeLessThan(checked / 10);
+    expect(checked).toBeGreaterThan(1000);
+    expect(refused).toBeLessThan(checked / 5);
+  }, 60_000);
+
+  it("the independent guard names a kept node written otherwise, and ids a changed node could not have", () => {
+    const keep = { type: "paragraph", attrs: { localId: "k" }, content: [{ type: "text", text: "Keep" }] };
+    const old = { type: "paragraph", attrs: { localId: "o" }, content: [{ type: "text", text: "Old" }] };
+    const source = { type: "doc", version: 1, content: [keep, old] };
+    const changed = (localId: string) => ({ type: "paragraph", attrs: { localId }, content: [{ type: "text", text: "New" }] });
+
+    expect(checkPreservation(source, markdownToAdf("Keep\n\nNew"), context)).toEqual({ rebuilt: [keep], invalid: [] });
+    expect(checkPreservation(source, { content: [keep, changed("o")] }, context)).toEqual({ rebuilt: [], invalid: [] });
+    // An id taken from a node that survived.
+    const stolen = changed("k");
+    expect(checkPreservation(source, { content: [keep, stolen] }, context).invalid).toContain(stolen);
+    expect(checkPreservation(source, patchDescriptionAdf(source, "Keep\n\nNew", context), context)).toEqual({ rebuilt: [], invalid: [] });
   });
 
-  it("names the source blocks a write rebuilt though their Markdown stayed", () => {
-    const keep = { type: "paragraph", attrs: { localId: "k" }, content: [{ type: "text", text: "Keep" }] };
-    const source = { type: "doc", version: 1, content: [keep, { type: "paragraph", content: [{ type: "text", text: "Old" }] }] };
-    const rebuilt = markdownToAdf("Keep\n\nNew");
+  it("the independent guard refuses when which of differing twins survived is open", () => {
+    const twin = (accessLevel: string) => ({ type: "mention", attrs: { id: "a", text: "@A", accessLevel } });
+    const first = twin("");
+    const second = twin("CONTAINER");
+    const source = { type: "doc", version: 1, content: [{ type: "paragraph", content: [first, { type: "text", text: " " }, second] }] };
 
-    expect(rebuiltBlocks(source, rebuilt, "Keep\n\nNew", context)).toEqual([keep]);
-    expect(rebuiltBlocks(source, patchDescriptionAdf(source, "Keep\n\nNew", context), "Keep\n\nNew", context)).toEqual([]);
+    expect(() => checkPreservation(source, { content: [{ type: "paragraph", content: [second] }] }, context)).toThrow(
+      "cannot tell which you kept",
+    );
   });
 });

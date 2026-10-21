@@ -280,6 +280,63 @@ describe("writeDescription", () => {
     );
   });
 
+  it("keeps list items the user swapped exactly, their mentions' attributes included", async () => {
+    const item = (localId: string, ...content: unknown[]) => ({ type: "listItem", attrs: { localId }, content: [{ type: "paragraph", attrs: { localId: `p${localId}` }, content }] });
+    const ana = { type: "mention", attrs: { id: "557058:ana", text: "@Ana", accessLevel: "CONTAINER", userType: "DEFAULT", localId: "m1" } };
+    const ask = item("i1", text("Ask "), ana);
+    const build = item("i2", text("Build"));
+    const ship = item("i3", text("Ship"));
+    const puts = stubJira({ description: doc({ type: "bulletList", attrs: { localId: "b1" }, content: [ask, build, ship] }) });
+
+    await writeDescription(connection, {
+      sourceId: SOURCE_ID,
+      text: "- Build\n- Ask [@Ana](mention:557058:ana)\n- Ship",
+      expected: "- Ask [@Ana](mention:557058:ana)\n- Build\n- Ship",
+    });
+    expect(writtenDescription(puts)).toEqual(doc({ type: "bulletList", attrs: { localId: "b1" }, content: [build, ask, ship] }));
+  });
+
+  it("keeps tasks the user reordered exactly, ids included", async () => {
+    const task = (localId: string, value: string) => ({ type: "taskItem", attrs: { localId, state: "TODO" }, content: [text(value)] });
+    const tasks = { type: "taskList", attrs: { localId: "l1" }, content: [task("t1", "Plan"), task("t2", "Build"), task("t3", "Ship")] };
+    const puts = stubJira({ description: doc(tasks) });
+
+    await writeDescription(connection, {
+      sourceId: SOURCE_ID,
+      text: "- [ ] Ship\n- [ ] Plan\n- [ ] Build",
+      expected: "- [ ] Plan\n- [ ] Build\n- [ ] Ship",
+    });
+    expect(writtenDescription(puts)).toEqual(doc({ ...tasks, content: [tasks.content[2], tasks.content[0], tasks.content[1]] }));
+  });
+
+  it("keeps the mention left when another mention of the same person is deleted", async () => {
+    const old = { type: "mention", attrs: { id: "557058:ana", text: "@Ana Old", accessLevel: "", userType: "DEFAULT", localId: "m1" } };
+    const kept = { type: "mention", attrs: { id: "557058:ana", text: "@Ana New", accessLevel: "CONTAINER", userType: "APP", localId: "m2" } };
+    const puts = stubJira({ description: doc(paragraph(old, text(" then "), kept)) });
+
+    await writeDescription(connection, {
+      sourceId: SOURCE_ID,
+      text: "then [@Ana New](mention:557058:ana)",
+      expected: "[@Ana Old](mention:557058:ana) then [@Ana New](mention:557058:ana)",
+    });
+    expect(writtenDescription(puts)).toEqual(doc(paragraph(text("then "), kept)));
+  });
+
+  it("writes nothing when it cannot tell which of two mentions that read the same was deleted", async () => {
+    const first = { type: "mention", attrs: { id: "557058:ana", text: "@Ana", accessLevel: "", localId: "m1" } };
+    const second = { type: "mention", attrs: { id: "557058:ana", text: "@Ana", accessLevel: "CONTAINER", localId: "m2" } };
+    const puts = stubJira({ description: doc(paragraph(first, text(" and "), second)) });
+
+    await expect(
+      writeDescription(connection, {
+        sourceId: SOURCE_ID,
+        text: "[@Ana](mention:557058:ana) and",
+        expected: "[@Ana](mention:557058:ana) and [@Ana](mention:557058:ana)",
+      }),
+    ).rejects.toThrow("cannot tell which you kept");
+    expect(puts).toEqual([]);
+  });
+
   it("writes nothing over a table whose code holds a backslash before a pipe, which Markdown tables cannot keep", async () => {
     const header = (content: unknown[]) => ({ type: "tableHeader", content: [paragraph(...content)] });
     const issue = {
