@@ -5,6 +5,7 @@ import {
   alignLines,
   reconcileDocument,
   restoreKeptNodes,
+  withoutIdentity,
 } from "./description-nested.js";
 
 export { AMBIGUOUS_EDIT };
@@ -99,12 +100,13 @@ export function patchDescriptionAdf(source: unknown, markdown: string, context: 
     return { start: first, end: first + (end - start) };
   });
 
-  // Parts that read the same, and whether their ADF differs, ids included:
-  // which of two twins with their own ids survived is as open as any.
+  // Parts that read the same, and whether their ADF differs beyond ids. Twins
+  // that differ only in ids are not ambiguous: the final pass keeps the
+  // earliest of them, in order.
   const groups = new Map<string, number[]>();
   parts.forEach((part, index) => groups.set(part.markdown, [...(groups.get(part.markdown) ?? []), index]));
   const differs = (members: number[]) =>
-    new Set(members.map((index) => JSON.stringify(content[parts[index]!.index]))).size > 1;
+    new Set(members.map((index) => withoutIdentity(content[parts[index]!.index]))).size > 1;
   const editedBlocks = JSON.parse(target) as string[];
   for (const [text, members] of groups) {
     if (members.length < 2 || !differs(members)) continue;

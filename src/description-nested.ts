@@ -183,7 +183,7 @@ function pairChildren(sources: AdfNode[], written: AdfNode[], context: AdfImageC
   sources.forEach((_, index) => {
     const uncertain = aligned.optional[index] || (aligned.match[index]! >= 0 && !aligned.certain[index]);
     const group = groups.get(sourceKeys[index]!)!;
-    const differs = group.length > 1 && new Set(group.map((node) => JSON.stringify(node))).size > 1;
+    const differs = group.length > 1 && new Set(group.map(withoutIdentity)).size > 1;
     // Fewer of them left than there were: which survived is open.
     const left = writtenKeys.filter((key) => key === sourceKeys[index]).length;
     if (differs && (uncertain || left < group.length)) throw new Error(AMBIGUOUS_EDIT);
@@ -266,7 +266,7 @@ function pairAtoms(sources: AdfNode[], written: AdfNode[], context: AdfImageCont
     for (const key of new Set(writtenAtoms.map((node) => keyOf(node, context)))) {
       const sameSource = sourceAtoms.filter((node) => keyOf(node, context) === key);
       const sameWritten = writtenAtoms.filter((node) => keyOf(node, context) === key);
-      if (sameWritten.length < sameSource.length && new Set(sameSource.map((node) => JSON.stringify(node))).size > 1) {
+      if (sameWritten.length < sameSource.length && new Set(sameSource.map(withoutIdentity)).size > 1) {
         throw new Error(AMBIGUOUS_EDIT);
       }
       sameWritten.slice(0, sameSource.length).forEach((node, index) => {
@@ -315,6 +315,14 @@ export function reconcileNode(source: AdfNode, rebuilt: AdfNode, context: AdfIma
   return result;
 }
 
+/** Attributes that only name a node: neither content nor how it looks. */
+const IDENTITY_ATTRIBUTES = new Set(["localId", "uniqueId"]);
+
+/** A node as JSON without its ids, at every depth. */
+export function withoutIdentity(node: unknown): string {
+  return JSON.stringify(node, (key, value) => (IDENTITY_ATTRIBUTES.has(key) ? undefined : value));
+}
+
 function nodeKey(node: AdfNode, path: string, context: AdfImageContext) {
   return `${path}>${String(node.type)}\u0000${keyOf(node, context)}`;
 }
@@ -346,10 +354,17 @@ export function restoreKeptNodes(source: AdfNode[], written: AdfNode[], context:
   const used = new Set<AdfNode>();
   const claim = (node: AdfNode) => subtree(node).forEach((each) => used.add(each));
   const writtenExactly = new Set<AdfNode>();
+  // Keys held by twins that differ only in ids, which are kept in order below.
+  const twinKeys = new Set(
+    [...candidates].filter(([, nodes]) => nodes.length > 1 && new Set(nodes.map(withoutIdentity)).size === 1).map(([key]) => key),
+  );
+  const isTwin = (node: AdfNode, key: string) =>
+    twinKeys.has(key) && withoutIdentity(node) === withoutIdentity(candidates.get(key)![0]);
 
   // Exact copies first, outermost first.
   const exact = (node: AdfNode, path: string) => {
     if (node.type !== "text") {
+      if (isTwin(node, nodeKey(node, path, context))) return;
       const match = (candidates.get(nodeKey(node, path, context)) ?? []).find(
         (candidate) => !used.has(candidate) && JSON.stringify(candidate) === JSON.stringify(node),
       );
@@ -363,8 +378,36 @@ export function restoreKeptNodes(source: AdfNode[], written: AdfNode[], context:
   };
   written.forEach((node) => exact(node, "doc"));
 
+  // Twins that differ only in ids: each written twin, in document order, is
+  // the earliest source twin not yet written. A twin past the source's count
+  // is the user's copy, and takes no id.
   const restored: AdfNode[] = [];
+  const replacement = new Map<AdfNode, AdfNode>();
+  // Outermost first across the whole document, so a twin block takes its
+  // source twin before the atoms inside another block are given theirs.
+  for (let level = written.map((node) => ({ node, path: "doc" })); level.length > 0; ) {
+    const deeper: { node: AdfNode; path: string }[] = [];
+    for (const { node, path } of level) {
+      if (node.type === "text" || writtenExactly.has(node)) continue;
+      const key = nodeKey(node, path, context);
+      if (!isTwin(node, key)) {
+        deeper.push(...childrenOf(node).map((child) => ({ node: child, path: `${path}>${String(node.type)}` })));
+        continue;
+      }
+      const next = candidates.get(key)!.find((candidate) => subtree(candidate).every((each) => !used.has(each)));
+      if (next) {
+        claim(next);
+        restored.push(next);
+        replacement.set(node, next);
+      } else {
+        replacement.set(node, JSON.parse(withoutIdentity(node)) as AdfNode);
+      }
+    }
+    level = deeper;
+  }
+
   const restore = (node: AdfNode, path: string): AdfNode => {
+    if (replacement.has(node)) return replacement.get(node)!;
     if (node.type === "text" || writtenExactly.has(node)) return node;
     const free =
       keyOf(node, context) === ""
@@ -383,14 +426,15 @@ export function restoreKeptNodes(source: AdfNode[], written: AdfNode[], context:
   };
   let result = written.map((node) => restore(node, "doc"));
 
-  // A rebuilt node keeps no id a restored node holds.
+  // A rebuilt node keeps no id a restored node holds, even where a source
+  // node it reused, such as a hard break, sits inside the restored one too.
   const restoredIds = new Set(
     restored.flatMap(subtree).map((node) => node.attrs?.localId).filter((id) => typeof id === "string"),
   );
   if (restoredIds.size > 0) {
-    const restoredNodes = new Set(restored.flatMap(subtree));
+    const restoredRoots = new Set(restored);
     const dropIds = (node: AdfNode): AdfNode => {
-      if (restoredNodes.has(node)) return node;
+      if (restoredRoots.has(node)) return node;
       let next = node;
       const id = node.attrs?.localId;
       if (typeof id === "string" && restoredIds.has(id)) {

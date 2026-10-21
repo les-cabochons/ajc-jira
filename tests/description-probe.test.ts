@@ -131,6 +131,41 @@ function generate(next: () => number) {
   return { type: "doc", version: 1, content: Array.from({ length: 1 + Math.floor(next() * 4) }, () => block(0)) };
 }
 
+/** A node as JSON without its ids. */
+function withoutIds(node: unknown) {
+  return JSON.stringify(node, (key, value) => (key === "localId" || key === "uniqueId" ? undefined : value));
+}
+
+/**
+ * For the top-level lists the write kept as lists, whether the items that
+ * have twins differing only in ids are written as the earliest source twins,
+ * in order. Undefined when no list has fewer such twins written than read.
+ */
+function earliestTwins(source: { content: unknown[] }, written: { content: unknown[] }) {
+  const lists = (document: { content: unknown[] }) =>
+    (document.content as Node[]).filter((node) => ["bulletList", "orderedList", "taskList"].includes(String(node.type)));
+  const sourceLists = lists(source);
+  const writtenLists = lists(written);
+  if (sourceLists.length !== writtenLists.length) return undefined;
+  let checked = false;
+  for (const [index, list] of sourceLists.entries()) {
+    const items = (list.content ?? []) as Node[];
+    const writtenItems = (writtenLists[index]!.content ?? []) as Node[];
+    for (const item of items) {
+      const twins = items.filter((other) => withoutIds(other) === withoutIds(item));
+      if (twins.length < 2 || new Set(twins.map((twin) => JSON.stringify(twin))).size < 2) continue;
+      const kept = writtenItems.filter((other) => withoutIds(other) === withoutIds(item));
+      if (kept.length === 0 || kept.length >= twins.length) continue;
+      checked = true;
+      const expected = twins.slice(0, kept.length).map((twin) => JSON.stringify(twin));
+      if (JSON.stringify(kept.map((twin) => JSON.stringify(twin))) !== JSON.stringify(expected)) {
+        return { ok: false, expected, kept: kept.map((twin) => JSON.stringify(twin)) };
+      }
+    }
+  }
+  return checked ? { ok: true } : undefined;
+}
+
 /** Every id a document holds, at every depth. */
 function everyId(value: { content?: unknown }) {
   const ids: string[] = [];
@@ -201,6 +236,19 @@ function dropOrCopyItem(markdown: string, pick: number, copy: boolean) {
   return lines.join("\n");
 }
 
+/** Deletes, or edits, one of two items of a list that read the same. */
+function touchTwin(markdown: string, pick: number) {
+  const lines = markdown.split("\n");
+  const twins = itemLines(lines).filter(
+    ({ line, index }) => !/^\s/.test(lines[index + 1] ?? "") && lines.some((other, at) => at !== index && other === line),
+  );
+  if (twins.length === 0) return markdown;
+  const { index } = twins[Math.floor(pick * twins.length)]!;
+  if (pick < 0.5) lines.splice(index, 1);
+  else lines[index] = `${lines[index]} zz`;
+  return lines.join("\n");
+}
+
 /** Deletes the first mention on a line that has one. */
 function dropMention(markdown: string) {
   return markdown.replace(/\[@[^\]]*\]\(mention:[^)]*\)/, "");
@@ -263,7 +311,7 @@ describe("generated descriptions", () => {
       }
       // Each block the edit left alone is still there, as it was, in order.
       const kept = read.parts.filter((_, index) => index !== edited).map((part) => source.content[part.index]);
-      const found = kept.filter((node) => written.content.includes(node as never));
+      const found = kept.filter((node) => written.content.some((each) => JSON.stringify(each) === JSON.stringify(node)));
       // A new paragraph set apart by blank lines joins no block.
       if (found.length !== kept.length) failures.push({ seed, kind: "kept", parts: read.parts.map((part) => part.markdown), edited, written: written.content.map((node) => JSON.stringify(node).slice(0, 120)), kept: kept.length, found: found.length });
       // Every empty line stays, as the blank lines around the edit did.
@@ -296,8 +344,12 @@ describe("generated descriptions", () => {
       (parts: string[], at: number, pick: number) => parts.map((part, index) => (index === at ? dropOrCopyItem(part, pick, false) : part)),
       (parts: string[], at: number, pick: number) => parts.map((part, index) => (index === at ? dropOrCopyItem(part, pick, true) : part)),
       (parts: string[], at: number) => parts.map((part, index) => (index === at ? dropMention(part) : part)),
+      // One of two twins deleted or edited, in any list.
+      (parts: string[], _at: number, pick: number) => parts.map((part) => touchTwin(part, pick)),
+      (parts: string[], _at: number, pick: number) => parts.map((part) => touchTwin(part, pick)),
     ];
     let refused = 0;
+    let twinCases = 0;
     let checked = 0;
     for (let seed = 1; seed <= 4000 && failures.length < 4; seed += 1) {
       const next = random(seed);
@@ -341,10 +393,20 @@ describe("generated descriptions", () => {
       }
       const ids = everyId(written);
       if (new Set(ids).size !== ids.length) failures.push({ seed, kind: "shared id", markdown, ids });
+      // Twins that differ only in ids, among a list's items: the written ones
+      // are the earliest source twins, in order.
+      const twinOrder = earliestTwins(source, written);
+      if (twinOrder) {
+        twinCases += 1;
+        if (!twinOrder.ok) failures.push({ seed, kind: "twin order", markdown, ...twinOrder });
+      }
     }
     expect(failures).toEqual([]);
     expect(checked).toBeGreaterThan(1000);
     expect(refused).toBeLessThan(checked / 5);
+    // Deleting or editing among twins that differ only in ids happens often enough to mean something.
+`);
+    expect(twinCases).toBeGreaterThan(10);
   }, 60_000);
 
   it("the independent guard names a kept node written otherwise, and ids a changed node could not have", () => {
@@ -359,6 +421,18 @@ describe("generated descriptions", () => {
     const stolen = changed("k");
     expect(checkPreservation(source, { content: [keep, stolen] }, context).invalid).toContain(stolen);
     expect(checkPreservation(source, patchDescriptionAdf(source, "Keep\n\nNew", context), context)).toEqual({ rebuilt: [], invalid: [] });
+  });
+
+  it("the independent guard accepts deleting one of twins that differ only in ids, as distinct source nodes", () => {
+    const note = (localId: string) => ({ type: "paragraph", attrs: { localId }, content: [{ type: "text", text: "Note" }] });
+    const [first, second] = [note("a"), note("b")];
+    const source = { type: "doc", version: 1, content: [first, second] };
+
+    expect(checkPreservation(source, { content: [first] }, context)).toEqual({ rebuilt: [], invalid: [] });
+    expect(checkPreservation(source, { content: [second] }, context)).toEqual({ rebuilt: [], invalid: [] });
+    // The same twin twice, or one without its id, is not a source node.
+    expect(checkPreservation(source, { content: [first, first] }, context).invalid).toContain(first);
+    expect(checkPreservation(source, { content: [note("z")] }, context).rebuilt).toEqual([first, second]);
   });
 
   it("the independent guard refuses when which of differing twins survived is open", () => {

@@ -114,10 +114,14 @@ one GET of its description and attachments.
   and attributes only from a source node of its kind that did not survive. No
   id is written twice. A kept node written otherwise must lose only what the
   user allowed; anything else writes nothing.
-- Nodes that read the same but differ in Jira, ids included, are kept only
-  where every optimal alignment agrees on which one stayed. When fewer of them
-  are left than there were, as when one of two is deleted, which survived
-  cannot be told, and nothing is written; the error says to edit in Jira.
+- Nodes that read the same and differ only in their ids (`localId`,
+  `uniqueId`) are twins no reader can tell apart: when some are deleted, the
+  write keeps the earliest of them, in document order, each a real source
+  node with its own id. Nodes that read the same but differ in anything else,
+  such as a mention's `accessLevel`, are kept only where every optimal
+  alignment agrees on which one stayed; when fewer of them are left than there
+  were, which survived cannot be told, and nothing is written; the error says
+  to edit in Jira.
 - A child the user moved without changing it, inside a list or task list, is
   kept as it was; so is a mention left when another of the same person goes.
 - Losses beyond the 20 names Ajour shows are checked too: such a description

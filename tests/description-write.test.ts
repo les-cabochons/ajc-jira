@@ -322,6 +322,47 @@ describe("writeDescription", () => {
     expect(writtenDescription(puts)).toEqual(doc(paragraph(text("then "), kept)));
   });
 
+  it("keeps the earliest of two paragraphs that differ only in their ids when one is deleted", async () => {
+    const first = { type: "paragraph", attrs: { localId: "a" }, content: [text("Note")] };
+    const second = { type: "paragraph", attrs: { localId: "b" }, content: [text("Note")] };
+    const other = { type: "paragraph", attrs: { localId: "c" }, content: [text("Other")] };
+    const puts = stubJira({ description: doc(first, second, other) });
+
+    await writeDescription(connection, { sourceId: SOURCE_ID, text: "Note\n\nOther", expected: "Note\n\nNote\n\nOther" });
+    expect(writtenDescription(puts)).toEqual(doc(first, other));
+  });
+
+  it("keeps the earliest of two tasks that differ only in their ids when one is deleted", async () => {
+    const task = (localId: string) => ({ type: "taskItem", attrs: { localId, state: "TODO" }, content: [text("Ship")] });
+    const tasks = { type: "taskList", attrs: { localId: "l1" }, content: [task("t1"), task("t2"), { type: "taskItem", attrs: { localId: "t3", state: "DONE" }, content: [text("Plan")] }] };
+    const puts = stubJira({ description: doc(tasks) });
+
+    await writeDescription(connection, {
+      sourceId: SOURCE_ID,
+      text: "- [ ] Ship\n- [x] Plan",
+      expected: "- [ ] Ship\n- [ ] Ship\n- [x] Plan",
+    });
+    expect(writtenDescription(puts)).toEqual(doc({ ...tasks, content: [tasks.content[0], tasks.content[2]] }));
+  });
+
+  it("writes nothing when one of two paragraphs that read the same but differ beyond ids is deleted", async () => {
+    const ask = (localId: string, userType: string) => ({
+      type: "paragraph",
+      attrs: { localId },
+      content: [text("Ask "), { type: "mention", attrs: { id: "557058:ana", text: "@Ana", userType } }],
+    });
+    const puts = stubJira({ description: doc(ask("a", "DEFAULT"), ask("b", "APP")) });
+
+    await expect(
+      writeDescription(connection, {
+        sourceId: SOURCE_ID,
+        text: "Ask [@Ana](mention:557058:ana)",
+        expected: "Ask [@Ana](mention:557058:ana)\n\nAsk [@Ana](mention:557058:ana)",
+      }),
+    ).rejects.toThrow("cannot tell which you kept");
+    expect(puts).toEqual([]);
+  });
+
   it("writes nothing when it cannot tell which of two mentions that read the same was deleted", async () => {
     const first = { type: "mention", attrs: { id: "557058:ana", text: "@Ana", accessLevel: "", localId: "m1" } };
     const second = { type: "mention", attrs: { id: "557058:ana", text: "@Ana", accessLevel: "CONTAINER", localId: "m2" } };

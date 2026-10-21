@@ -40,6 +40,14 @@ function inventory(content: AdfNode[], context: AdfImageContext): Entry[] {
   return entries;
 }
 
+/** Attributes that only name a node: neither content nor how it looks. */
+const IDENTITY_ATTRIBUTES = new Set(["localId", "uniqueId"]);
+
+/** A node as JSON without its ids, at every depth. */
+function withoutIdentity(node: AdfNode) {
+  return JSON.stringify(node, (key, value) => (IDENTITY_ATTRIBUTES.has(key) ? undefined : value));
+}
+
 /** Every node in `content`, at every depth. */
 function everyNode(content: AdfNode[]): AdfNode[] {
   return content.flatMap((node) => [node, ...everyNode(childrenOf(node))]);
@@ -104,7 +112,9 @@ export function checkPreservation(
   const freeWritten: Entry[] = [];
   for (const [key, writtenNodes] of writtens) {
     const sourceNodes = sources.get(key) ?? [];
-    if (writtenNodes.length < sourceNodes.length && new Set(sourceNodes.map((entry) => entry.json)).size > 1) {
+    // Twins that differ only in ids read and look the same: any of them is
+    // a real source node, and the matching below checks each is distinct.
+    if (writtenNodes.length < sourceNodes.length && new Set(sourceNodes.map((entry) => withoutIdentity(entry.node))).size > 1) {
       throw new Error(AMBIGUOUS_EDIT);
     }
     const unmatched = writtenNodes.filter((entry) => !matched.has(entry));
