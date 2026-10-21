@@ -198,6 +198,8 @@ function decorate<T>(value: T, next: () => number = () => 0): T {
       if (node.type === "tableHeader" || node.type === "tableCell") Object.assign(attrs, { colspan: 1, rowspan: 1 });
       if (node.type === "table") Object.assign(attrs, { isNumberColumnEnabled: false, layout: "center", width: 760 });
       if (node.type === "hardBreak") Object.assign(attrs, { text: "\n" });
+      // Code blocks carry Jira's other id.
+      if (node.type === "codeBlock" && next() < 0.8) attrs.uniqueId = `u${(count += 1)}`;
       if (Object.keys(attrs).length > 0 || node.attrs) copy.attrs = attrs;
     }
     if (Array.isArray(copy.content)) copy.content = copy.content.map(walk);
@@ -246,6 +248,31 @@ function touchTwin(markdown: string, pick: number) {
   const { index } = twins[Math.floor(pick * twins.length)]!;
   if (pick < 0.5) lines.splice(index, 1);
   else lines[index] = `${lines[index]} zz`;
+  return lines.join("\n");
+}
+
+/** Whether a block's Markdown is plain lines: no fence, table or list. */
+function isPlainLines(markdown: string) {
+  return !/^(?:\s*(?:```|~~~|\||- |\d+\. |> )|#)/m.test(markdown);
+}
+
+/** Changes the kind of a block around unchanged text: heading, list item or quote. */
+function changeKind(markdown: string, pick: number) {
+  if (/^#{1,6} /.test(markdown)) return markdown.replace(/^#{1,6} /, "");
+  if (!isPlainLines(markdown)) return markdown.split("\n").map((line) => (line ? `> ${line}` : ">")).join("\n");
+  const lines = markdown.split("\n");
+  if (pick < 0.33) return `## ${lines.join(" ")}`;
+  if (pick < 0.66) return lines.map((line, index) => (index === 0 ? `- ${line}` : `  ${line}`)).join("\n");
+  return lines.map((line) => `> ${line}`).join("\n");
+}
+
+/** Adds or deletes a line inside a block of plain lines, so its hard breaks change. */
+function changeLines(markdown: string, pick: number) {
+  if (!isPlainLines(markdown)) return markdown;
+  const lines = markdown.split("\n");
+  const at = Math.floor(pick * lines.length);
+  if (pick < 0.5 || lines.length < 2) lines.splice(at + 1, 0, "added line");
+  else lines.splice(at, 1);
   return lines.join("\n");
 }
 
@@ -347,6 +374,12 @@ describe("generated descriptions", () => {
       // One of two twins deleted or edited, in any list.
       (parts: string[], _at: number, pick: number) => parts.map((part) => touchTwin(part, pick)),
       (parts: string[], _at: number, pick: number) => parts.map((part) => touchTwin(part, pick)),
+      // A block's kind changed around unchanged text, and lines added or
+      // deleted between hard breaks.
+      (parts: string[], at: number, pick: number) => parts.map((part, index) => (index === at ? changeKind(part, pick) : part)),
+      (parts: string[], at: number, pick: number) => parts.map((part, index) => (index === at ? changeKind(part, pick) : part)),
+      (parts: string[], at: number, pick: number) => parts.map((part, index) => (index === at ? changeLines(part, pick) : part)),
+      (parts: string[], at: number, pick: number) => parts.map((part, index) => (index === at ? changeLines(part, pick) : part)),
     ];
     let refused = 0;
     let twinCases = 0;
@@ -356,7 +389,13 @@ describe("generated descriptions", () => {
       // Most nodes have their own id, and mentions, cells and tables the
       // attributes Markdown has no place for, so keeping a node means keeping
       // that very node.
-      const value = decorate(generate(next), next);
+      // Some descriptions hold a block twice, as code-block twins.
+      const generated = generate(next);
+      if (next() < 0.3) {
+        const at = Math.floor(next() * generated.content.length);
+        generated.content.splice(at + 1, 0, generated.content[at]!);
+      }
+      const value = decorate(generated, next);
       const source = { ...value, content: value.content.flatMap((node) => (next() < 0.3 ? [{ type: "paragraph" }, node] : [node])) };
       if (describeJiraDescription(source, context).lost?.includes(NOT_WRITABLE_EXACTLY)) continue;
       const read = adfToMarkdownParts(source, context)!;
@@ -422,16 +461,48 @@ describe("generated descriptions", () => {
     expect(checkPreservation(source, patchDescriptionAdf(source, "Keep\n\nNew", context), context)).toEqual({ rebuilt: [], invalid: [] });
   });
 
+  it("the conservation check catches a mention rebuilt when its paragraph became a heading", () => {
+    // As the patch wrote it before round 4: the mention lost its attributes.
+    const ana = { type: "mention", attrs: { id: "x", text: "@Ana", accessLevel: "CONTAINER", userType: "DEFAULT" } };
+    const source = { type: "doc", version: 1, content: [{ type: "paragraph", content: [{ type: "text", text: "Ask " }, ana] }] };
+    const written = {
+      content: [{ type: "heading", attrs: { level: 1 }, content: [{ type: "text", text: "Ask " }, { type: "mention", attrs: { id: "x", text: "@Ana" } }] }],
+    };
+
+    expect(checkPreservation(source, written, context).rebuilt).toEqual([ana]);
+    expect(checkPreservation(source, patchDescriptionAdf(source, "# Ask [@Ana](mention:x)", context), context)).toEqual({ rebuilt: [], invalid: [] });
+  });
+
+  it("the conservation check catches a hard break rebuilt when a line was added", () => {
+    // As the patch wrote it before round 4: the existing break lost its id and text.
+    const lineBreak = { type: "hardBreak", attrs: { text: "\n", localId: "break-1" } };
+    const t = (value: string) => ({ type: "text", text: value });
+    const source = { type: "doc", version: 1, content: [{ type: "paragraph", content: [t("a"), lineBreak, t("b")] }] };
+    const written = { content: [{ type: "paragraph", content: [t("a"), { type: "hardBreak" }, t("b"), { type: "hardBreak" }, t("c")] }] };
+
+    expect(checkPreservation(source, written, context).rebuilt).toEqual([lineBreak]);
+    expect(checkPreservation(source, patchDescriptionAdf(source, "a\nb\nc", context), context)).toEqual({ rebuilt: [], invalid: [] });
+  });
+
+  it("the conservation check names a uniqueId written twice", () => {
+    const code = (uniqueId: string, value: string) => ({ type: "codeBlock", attrs: { uniqueId }, content: [{ type: "text", text: value }] });
+    const source = { type: "doc", version: 1, content: [code("A", "x"), code("B", "x")] };
+    const edited = code("A", "y");
+
+    expect(checkPreservation(source, { content: [edited, code("A", "x")] }, context).invalid).toContain(edited);
+  });
+
   it("the independent guard accepts deleting one of twins that differ only in ids, as distinct source nodes", () => {
     const note = (localId: string) => ({ type: "paragraph", attrs: { localId }, content: [{ type: "text", text: "Note" }] });
     const [first, second] = [note("a"), note("b")];
     const source = { type: "doc", version: 1, content: [first, second] };
 
     expect(checkPreservation(source, { content: [first] }, context)).toEqual({ rebuilt: [], invalid: [] });
-    expect(checkPreservation(source, { content: [second] }, context)).toEqual({ rebuilt: [], invalid: [] });
+    // The earliest twin is the one kept.
+    expect(checkPreservation(source, { content: [second] }, context)).toEqual({ rebuilt: [first], invalid: [second] });
     // The same twin twice, or one without its id, is not a source node.
     expect(checkPreservation(source, { content: [first, first] }, context).invalid).toContain(first);
-    expect(checkPreservation(source, { content: [note("z")] }, context).rebuilt).toEqual([first, second]);
+    expect(checkPreservation(source, { content: [note("z")] }, context).rebuilt).toEqual([first]);
   });
 
   it("the independent guard refuses when which of differing twins survived is open", () => {

@@ -363,6 +363,42 @@ describe("writeDescription", () => {
     expect(puts).toEqual([]);
   });
 
+  it("keeps a mention exactly when its paragraph becomes a heading", async () => {
+    const ana = { type: "mention", attrs: { id: "557058:ana", text: "@Ana", accessLevel: "CONTAINER", userType: "DEFAULT", localId: "m1" } };
+    const puts = stubJira({ description: doc({ type: "paragraph", attrs: { localId: "p1" }, content: [text("Ask "), ana] }) });
+
+    await writeDescription(connection, {
+      sourceId: SOURCE_ID,
+      text: "# Ask [@Ana](mention:557058:ana)",
+      expected: "Ask [@Ana](mention:557058:ana)",
+    });
+    expect(writtenDescription(puts)).toEqual(doc({ type: "heading", attrs: { level: 1 }, content: [text("Ask "), ana] }));
+  });
+
+  it("keeps a hard break exactly when a line is added after it", async () => {
+    const lineBreak = { type: "hardBreak", attrs: { text: "\n", localId: "break-1" } };
+    const puts = stubJira({ description: doc(paragraph(text("a"), lineBreak, text("b"))) });
+
+    await writeDescription(connection, { sourceId: SOURCE_ID, text: "a\nb\nc", expected: "a\nb" });
+    expect(writtenDescription(puts)).toEqual(doc(paragraph(text("a"), lineBreak, text("b"), { type: "hardBreak" }, text("c"))));
+  });
+
+  it("writes code-block twins that differ only in uniqueId with no id twice", async () => {
+    const code = (uniqueId: string) => ({ type: "codeBlock", attrs: { language: "js", uniqueId }, content: [text("x")] });
+    const puts = stubJira({ description: doc(code("A"), code("B")) });
+
+    await writeDescription(connection, {
+      sourceId: SOURCE_ID,
+      text: "```js\ny\n```\n\n```js\nx\n```",
+      expected: "```js\nx\n```\n\n```js\nx\n```",
+    });
+    const written = writtenDescription(puts) as { content: Array<{ attrs?: { uniqueId?: string }; content: unknown[] }> };
+    // The unchanged block is the earliest source twin; the edited one keeps no id that one holds.
+    expect(written.content[1]).toEqual(code("A"));
+    expect(written.content[0]!.content).toEqual([text("y")]);
+    expect(written.content[0]!.attrs?.uniqueId).not.toBe("A");
+  });
+
   it("writes nothing when it cannot tell which of two mentions that read the same was deleted", async () => {
     const first = { type: "mention", attrs: { id: "557058:ana", text: "@Ana", accessLevel: "", localId: "m1" } };
     const second = { type: "mention", attrs: { id: "557058:ana", text: "@Ana", accessLevel: "CONTAINER", localId: "m2" } };

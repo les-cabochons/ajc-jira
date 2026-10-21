@@ -106,14 +106,22 @@ one GET of its description and attachments.
   the source child itself; a changed child keeps its ids and the attributes
   Markdown has no place for, and a mention, inline file or smart link in
   changed text keeps its source attributes.
-- A check runs on the result that shares none of the patch's alignment. It
-  keys every node, at every depth, by where it stands, its kind and its
-  Markdown, and matches the written nodes to the source's, outermost first:
-  a written node whose key the source has must be one of those source nodes,
-  deep-equal, ids and attributes included, and a changed node may carry ids
-  and attributes only from a source node of its kind that did not survive. No
-  id is written twice. A kept node written otherwise must lose only what the
-  user allowed; anything else writes nothing.
+- A check runs on the result that shares none of the patch's alignment, and
+  conserves the source. It keys every node, at every depth, by its kind and
+  its own Markdown, not by its ancestors, so a mention stays the same mention
+  when its paragraph becomes a heading. A hard break is keyed by the lines on
+  each side, an empty block by the nearest blocks with Markdown. For every
+  key the written description still holds, every source node with that key
+  must be written, deep-equal, ids and attributes included, matched outermost
+  first; a key no longer held was changed or deleted by the user. A changed
+  node may carry ids and attributes only from a source node of its kind that
+  did not survive, and no id (`localId`, `uniqueId`) is written twice. A kept
+  node written otherwise must lose only what the user allowed; anything else
+  writes nothing.
+- The write keeps each node that reads the same as a source node, wherever it
+  now stands: a mention in a paragraph turned heading, list item or quote, and
+  each existing hard break between the same two lines when lines are added or
+  deleted around it.
 - Nodes that read the same and differ only in their ids (`localId`,
   `uniqueId`) are twins no reader can tell apart: when some are deleted, the
   write keeps the earliest of them, in document order, each a real source

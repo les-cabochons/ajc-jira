@@ -254,7 +254,7 @@ function atomIdentity(node: AdfNode): string | undefined {
  * by person, file by file: first those that read exactly the same, in order;
  * then a renamed one with the one source atom left. When which survived, or
  * which was renamed, is open and the source atoms differ, the edit is
- * ambiguous. Hard breaks pair in order when there are as many.
+ * ambiguous.
  */
 function pairAtoms(sources: AdfNode[], written: AdfNode[], context: AdfImageContext): Pair[] {
   const pairs: Pair[] = [];
@@ -286,11 +286,7 @@ function pairAtoms(sources: AdfNode[], written: AdfNode[], context: AdfImageCont
     if (leftSource.length > 1 && new Set(leftSource.map(kept)).size > 1) continue;
     leftWritten.forEach((node, index) => pairs.push({ source: leftSource[index]!, written: node, same: false }));
   }
-  const sourceBreaks = sources.filter((node) => node.type === "hardBreak");
-  const writtenBreaks = written.filter((node) => node.type === "hardBreak");
-  if (sourceBreaks.length === writtenBreaks.length) {
-    sourceBreaks.forEach((node, index) => pairs.push({ source: node, written: writtenBreaks[index]!, same: true }));
-  }
+  // Hard breaks are kept by `restoreKeptNodes`, by the lines on each side.
   return pairs;
 }
 
@@ -318,13 +314,15 @@ export function reconcileNode(source: AdfNode, rebuilt: AdfNode, context: AdfIma
 /** Attributes that only name a node: neither content nor how it looks. */
 const IDENTITY_ATTRIBUTES = new Set(["localId", "uniqueId"]);
 
-/** A node as JSON without its ids, at every depth. */
+/** A node as JSON without its ids, at every depth: attributes left empty count as none. */
 export function withoutIdentity(node: unknown): string {
-  return JSON.stringify(node, (key, value) => (IDENTITY_ATTRIBUTES.has(key) ? undefined : value));
-}
-
-function nodeKey(node: AdfNode, path: string, context: AdfImageContext) {
-  return `${path}>${String(node.type)}\u0000${keyOf(node, context)}`;
+  return JSON.stringify(node, (key, value) => {
+    if (IDENTITY_ATTRIBUTES.has(key)) return undefined;
+    if (key === "attrs" && value && typeof value === "object" && Object.keys(value).every((name) => IDENTITY_ATTRIBUTES.has(name))) {
+      return undefined;
+    }
+    return value;
+  });
 }
 
 /** A node and every node under it. */
@@ -332,123 +330,161 @@ function subtree(node: AdfNode): AdfNode[] {
   return [node, ...childrenOf(node).flatMap(subtree)];
 }
 
+/** A node's place in a document, with its key and the places under it. */
+type Slot = { node: AdfNode; key: string | undefined; place: string; children: Slot[] };
+
+/** The Markdown of a run of siblings, inline or blocks. */
+function runMarkdown(siblings: AdfNode[], inline: boolean, context: AdfImageContext) {
+  const content = inline ? [{ type: "paragraph", content: siblings }] : siblings;
+  return adfToMarkdown({ type: "doc", version: 1, content } as AdfNode, context) ?? "";
+}
+
 /**
- * The last pass of a rebuild: any written node that reads the same, where it
- * stands, as a source node the write does not hold yet becomes that source
- * node, ids and attributes included, wherever the alignment lost track of it,
- * as a mention in two paragraphs the user joined. Nodes already written
- * exactly are claimed first. When the source nodes it could be differ, the
- * edit is ambiguous. Ids a rebuilt node took from a node restored here are
- * dropped from it.
+ * The places of a run of siblings, each keyed by its kind and its own
+ * Markdown, whatever its ancestors are. A node with no Markdown of its own is
+ * keyed by its kind and its neighbours: a hard break by the lines on each
+ * side, an empty block by the nearest blocks with Markdown on each side.
+ */
+function slotsOf(siblings: AdfNode[], inline: boolean, place: string, context: AdfImageContext): Slot[] {
+  const markdowns = siblings.map((node) => (node.type === "text" ? "-" : keyOf(node, context)));
+  const isBoundary = (at: number, type: unknown) => siblings[at]!.type === type && markdowns[at] === "";
+  return siblings.map((node, index) => {
+    const type = String(node.type);
+    let key: string | undefined;
+    if (type !== "text") {
+      const markdown = markdowns[index]!;
+      if (markdown !== "") {
+        key = `${type}\u0000${markdown}`;
+      } else if (inline) {
+        let start = index;
+        while (start > 0 && !isBoundary(start - 1, node.type)) start -= 1;
+        let end = index + 1;
+        while (end < siblings.length && !isBoundary(end, node.type)) end += 1;
+        key = `${type}\u0000\u0001${runMarkdown(siblings.slice(start, index), true, context)}\u0001${runMarkdown(siblings.slice(index + 1, end), true, context)}`;
+      } else {
+        const before = markdowns.slice(0, index).filter((each) => each !== "").at(-1) ?? "";
+        const after = markdowns.slice(index + 1).find((each) => each !== "") ?? "";
+        key = `${type}\u0000\u0001${before}\u0001${after}`;
+      }
+    }
+    const at = `${place}/${index}`;
+    return { node, key, place: at, children: slotsOf(childrenOf(node), INLINE_CONTAINERS.has(type), at, context) };
+  });
+}
+
+function identitiesOf(node: AdfNode) {
+  return [...IDENTITY_ATTRIBUTES].flatMap((name) => {
+    const value = node.attrs?.[name];
+    return typeof value === "string" && value !== "" ? [`${name}=${value}`] : [];
+  });
+}
+
+/**
+ * The last pass of a rebuild, which conserves the source: any written node
+ * that reads the same as a source node the write does not hold yet becomes
+ * that source node, ids and attributes included, wherever the alignment lost
+ * track of it, as a mention whose paragraph became a heading, or a hard break
+ * between the same two lines. Nodes written exactly are claimed first,
+ * outermost first. Twins that differ only in ids are given in document order,
+ * the earliest first. When the source nodes a node could be differ beyond
+ * ids, the edit is ambiguous. A rebuilt node keeps no id a kept node holds.
  */
 export function restoreKeptNodes(source: AdfNode[], written: AdfNode[], context: AdfImageContext): AdfNode[] {
   const candidates = new Map<string, AdfNode[]>();
-  const index = (node: AdfNode, path: string) => {
-    if (node.type !== "text" && keyOf(node, context) !== "") {
-      const key = nodeKey(node, path, context);
-      candidates.set(key, [...(candidates.get(key) ?? []), node]);
+  const index = (slots: Slot[]) => {
+    for (const slot of slots) {
+      if (slot.key) candidates.set(slot.key, [...(candidates.get(slot.key) ?? []), slot.node]);
+      index(slot.children);
     }
-    for (const child of childrenOf(node)) index(child, `${path}>${String(node.type)}`);
   };
-  source.forEach((node) => index(node, "doc"));
+  index(slotsOf(source, false, "", context));
+  const writtenSlots = slotsOf(written, false, "", context);
+
   const used = new Set<AdfNode>();
   const claim = (node: AdfNode) => subtree(node).forEach((each) => used.add(each));
-  const writtenExactly = new Set<AdfNode>();
-  // Keys held by twins that differ only in ids, which are kept in order below.
   const twinKeys = new Set(
     [...candidates].filter(([, nodes]) => nodes.length > 1 && new Set(nodes.map(withoutIdentity)).size === 1).map(([key]) => key),
   );
-  const isTwin = (node: AdfNode, key: string) =>
-    twinKeys.has(key) && withoutIdentity(node) === withoutIdentity(candidates.get(key)![0]);
+  const isTwin = (slot: Slot) =>
+    slot.key !== undefined && twinKeys.has(slot.key) && withoutIdentity(slot.node) === withoutIdentity(candidates.get(slot.key)![0]);
+  /** What each place becomes: a source node, or a copy without ids. */
+  const replacement = new Map<string, AdfNode>();
+  const exactPlaces = new Set<string>();
 
-  // Exact copies first, outermost first.
-  const exact = (node: AdfNode, path: string) => {
-    if (node.type !== "text") {
-      if (isTwin(node, nodeKey(node, path, context))) return;
-      const match = (candidates.get(nodeKey(node, path, context)) ?? []).find(
-        (candidate) => !used.has(candidate) && JSON.stringify(candidate) === JSON.stringify(node),
+  // Exact copies first, outermost first across the whole document, so a block
+  // is claimed before the atoms inside another block are.
+  for (let level = writtenSlots; level.length > 0; ) {
+    const deeper: Slot[] = [];
+    for (const slot of level) {
+      if (!slot.key || isTwin(slot)) {
+        if (!slot.key && slot.node.type !== "text") deeper.push(...slot.children);
+        continue;
+      }
+      const json = JSON.stringify(slot.node);
+      const match = (candidates.get(slot.key) ?? []).find(
+        (candidate) => subtree(candidate).every((each) => !used.has(each)) && JSON.stringify(candidate) === json,
       );
       if (match) {
         claim(match);
-        writtenExactly.add(node);
-        return;
-      }
-    }
-    for (const child of childrenOf(node)) exact(child, `${path}>${String(node.type)}`);
-  };
-  written.forEach((node) => exact(node, "doc"));
-
-  // Twins that differ only in ids: each written twin, in document order, is
-  // the earliest source twin not yet written. A twin past the source's count
-  // is the user's copy, and takes no id.
-  const restored: AdfNode[] = [];
-  const replacement = new Map<AdfNode, AdfNode>();
-  // Outermost first across the whole document, so a twin block takes its
-  // source twin before the atoms inside another block are given theirs.
-  for (let level = written.map((node) => ({ node, path: "doc" })); level.length > 0; ) {
-    const deeper: { node: AdfNode; path: string }[] = [];
-    for (const { node, path } of level) {
-      if (node.type === "text" || writtenExactly.has(node)) continue;
-      const key = nodeKey(node, path, context);
-      if (!isTwin(node, key)) {
-        deeper.push(...childrenOf(node).map((child) => ({ node: child, path: `${path}>${String(node.type)}` })));
+        exactPlaces.add(slot.place);
         continue;
       }
-      const next = candidates.get(key)!.find((candidate) => subtree(candidate).every((each) => !used.has(each)));
-      if (next) {
-        claim(next);
-        restored.push(next);
-        replacement.set(node, next);
-      } else {
-        replacement.set(node, JSON.parse(withoutIdentity(node)) as AdfNode);
-      }
+      deeper.push(...slot.children);
     }
     level = deeper;
   }
 
-  const restore = (node: AdfNode, path: string): AdfNode => {
-    if (replacement.has(node)) return replacement.get(node)!;
-    if (node.type === "text" || writtenExactly.has(node)) return node;
-    const free =
-      keyOf(node, context) === ""
-        ? []
-        : (candidates.get(nodeKey(node, path, context)) ?? []).filter((candidate) => !used.has(candidate));
-    if (free.length > 0) {
-      if (new Set(free.map((candidate) => JSON.stringify(candidate))).size > 1) throw new Error(AMBIGUOUS_EDIT);
-      claim(free[0]!);
-      restored.push(free[0]!);
-      return free[0]!;
-    }
-    const children = childrenOf(node);
-    if (children.length === 0) return node;
-    const content = children.map((child) => restore(child, `${path}>${String(node.type)}`));
-    return content.every((child, at) => child === children[at]) ? node : { ...node, content };
-  };
-  let result = written.map((node) => restore(node, "doc"));
-
-  // A rebuilt node keeps no id a restored node holds, even where a source
-  // node it reused, such as a hard break, sits inside the restored one too.
-  const restoredIds = new Set(
-    restored.flatMap(subtree).map((node) => node.attrs?.localId).filter((id) => typeof id === "string"),
-  );
-  if (restoredIds.size > 0) {
-    const restoredRoots = new Set(restored);
-    const dropIds = (node: AdfNode): AdfNode => {
-      if (restoredRoots.has(node)) return node;
-      let next = node;
-      const id = node.attrs?.localId;
-      if (typeof id === "string" && restoredIds.has(id)) {
-        const { localId: _dropped, ...attrs } = node.attrs!;
-        next = { ...node, attrs };
+  // Twins that differ only in ids: each written twin, in document order and
+  // outermost first across the document, is the earliest source twin not yet
+  // written. A twin past the source's count is the user's copy, with no ids.
+  for (let level = writtenSlots; level.length > 0; ) {
+    const deeper: Slot[] = [];
+    for (const slot of level) {
+      if (!slot.key || exactPlaces.has(slot.place)) continue;
+      if (!isTwin(slot)) {
+        deeper.push(...slot.children);
+        continue;
       }
-      const children = childrenOf(next);
-      if (children.length === 0) return next;
-      const content = children.map(dropIds);
-      return content.every((child, at) => child === children[at]) ? next : { ...next, content };
-    };
-    result = result.map(dropIds);
+      const next = candidates.get(slot.key)!.find((candidate) => subtree(candidate).every((each) => !used.has(each)));
+      if (next) claim(next);
+      replacement.set(slot.place, next ?? (JSON.parse(withoutIdentity(slot.node)) as AdfNode));
+    }
+    level = deeper;
   }
-  return result;
+
+  // Then any other node that reads as a source node not yet written.
+  const decide = (slots: Slot[]) => {
+    for (const slot of slots) {
+      if (!slot.key || exactPlaces.has(slot.place) || replacement.has(slot.place)) continue;
+      const free = (candidates.get(slot.key) ?? []).filter((candidate) => !used.has(candidate));
+      if (free.length > 0) {
+        if (new Set(free.map(withoutIdentity)).size > 1) throw new Error(AMBIGUOUS_EDIT);
+        claim(free[0]!);
+        replacement.set(slot.place, free[0]!);
+        continue;
+      }
+      decide(slot.children);
+    }
+  };
+  decide(writtenSlots);
+
+  // Every id a kept source node holds; no rebuilt node may hold one too.
+  const keptIds = new Set([...used].flatMap(identitiesOf));
+  const build = (slot: Slot): AdfNode => {
+    if (replacement.has(slot.place)) return replacement.get(slot.place)!;
+    if (exactPlaces.has(slot.place) || slot.node.type === "text") return slot.node;
+    let node = slot.node;
+    const clashing = identitiesOf(node).filter((id) => keptIds.has(id));
+    if (clashing.length > 0) {
+      const attrs = { ...node.attrs };
+      for (const id of clashing) delete attrs[id.slice(0, id.indexOf("="))];
+      node = { ...node, attrs };
+    }
+    if (slot.children.length === 0) return node;
+    const content = slot.children.map(build);
+    return content.every((child, at) => child === slot.children[at]!.node) ? node : { ...node, content };
+  };
+  return writtenSlots.map(build);
 }
 
 /**
