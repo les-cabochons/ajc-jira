@@ -192,6 +192,131 @@ describe("writeDescription", () => {
     );
   });
 
+  it("keeps a table's code with a pipe exactly when another cell changes", async () => {
+    const header = (content: unknown[]) => ({ type: "tableHeader", content: [paragraph(...content)] });
+    const issue = {
+      description: doc({
+        type: "table",
+        content: [{ type: "tableRow", content: [header([text("a|b", [{ type: "code" }])]), header([text("x")])] }],
+      }),
+    };
+    const puts = stubJira(issue);
+
+    await writeDescription(connection, { sourceId: SOURCE_ID, text: "| `a\\|b` | y |\n| --- | --- |", expected: "| `a\\|b` | x |\n| --- | --- |" });
+    const table = (writtenDescription(puts) as { content: Array<{ content: Array<{ content: Array<{ content: unknown[] }> }> }> }).content[0]!;
+    expect(table.content[0]!.content[0]!.content).toEqual([paragraph(text("a|b", [{ type: "code" }]))]);
+  });
+
+  it("writes nothing over a table whose code holds a backslash before a pipe, which Markdown tables cannot keep", async () => {
+    const header = (content: unknown[]) => ({ type: "tableHeader", content: [paragraph(...content)] });
+    const issue = {
+      description: doc({
+        type: "table",
+        content: [{ type: "tableRow", content: [header([text("a\\|b", [{ type: "code" }])]), header([text("x")])] }],
+      }),
+    };
+    const puts = stubJira(issue);
+
+    await expect(
+      writeDescription(connection, { sourceId: SOURCE_ID, text: "| `a\\|b` | y |\n| --- | --- |", expected: "| `a\\|b` | x |\n| --- | --- |" }),
+    ).rejects.toThrow("Writing it would lose its other formatting in Jira. Edit it there.");
+    expect(puts).toEqual([]);
+  });
+
+  it("writes nothing when the description loses more kinds of formatting than Ajour can name", async () => {
+    const mark = (type: string, attrs?: Record<string, unknown>) => ({ type, ...(attrs ? { attrs } : {}) });
+    const lossy = [
+      paragraph(text("a", [mark("textColor", { color: "#ff0000" })])),
+      paragraph(text("a", [mark("backgroundColor", { color: "#ffff00" })])),
+      paragraph(text("a", [mark("underline")])),
+      paragraph(text("a", [mark("subsup", { type: "sup" })])),
+      paragraph(text("a", [mark("subsup", { type: "sub" })])),
+      paragraph(text("a", [mark("annotation", { id: "x", annotationType: "inlineComment" })])),
+      { ...paragraph(text("a")), marks: [mark("alignment", { align: "center" })] },
+      { ...paragraph(text("a")), marks: [mark("indentation", { level: 1 })] },
+      { ...paragraph(text("a")), marks: [mark("fontSize", { fontSize: "small" })] },
+      { type: "panel", attrs: { panelType: "info" }, content: [paragraph(text("a"))] },
+      { type: "expand", attrs: { title: "T" }, content: [paragraph(text("a"))] },
+      paragraph({ type: "status", attrs: { text: "OK", color: "green" } }),
+      paragraph({ type: "date", attrs: { timestamp: "0" } }),
+      paragraph({ type: "emoji", attrs: { shortName: ":smile:", text: "😄" } }),
+      { type: "blockCard", attrs: { url: "https://e.com" } },
+      { type: "codeBlock", marks: [mark("breakout", { mode: "wide" })], content: [text("x")] },
+      { type: "bodiedExtension", attrs: {}, content: [paragraph(text("a"))] },
+      paragraph(text("a ")),
+      paragraph(text("a", [mark("code"), mark("strong")])),
+      { type: "heading", attrs: { level: 1 }, content: [text("a"), { type: "hardBreak" }, text("b")] },
+      // The 21st: a caption a colleague added, which Ajour could never show the user.
+      { type: "mediaSingle", attrs: { layout: "center" }, content: [{ type: "media", attrs: { type: "file", id: "f", collection: "" } }, { type: "caption", content: [text("Cap")] }] },
+    ];
+    const issue = { description: doc(paragraph(text("Old plan")), ...lossy) };
+    const puts = stubJira(issue);
+    const { describeJiraDescription } = await import("../src/description.ts");
+    const shown = describeJiraDescription(issue.description, { issueUrl: SOURCE_ID });
+    expect(shown.lost).toHaveLength(20);
+
+    await expect(
+      writeDescription(connection, {
+        sourceId: SOURCE_ID,
+        text: shown.text.replace("Old plan", "New plan"),
+        expected: shown.text,
+        allowedLoss: shown.lost,
+      }),
+    ).rejects.toThrow("loses more kinds of formatting than Ajour can name");
+    expect(puts).toEqual([]);
+  });
+
+  it("keeps a block the user moved as it was", async () => {
+    const tasks = {
+      type: "taskList",
+      attrs: { localId: "l1" },
+      content: [{ type: "taskItem", attrs: { localId: "t1", state: "TODO" }, content: [text("Ship")] }],
+    };
+    const note = { type: "paragraph", attrs: { localId: "n1" }, content: [text("Note")] };
+    const issue = { description: doc(tasks, note) };
+    const puts = stubJira(issue);
+
+    await writeDescription(connection, { sourceId: SOURCE_ID, text: "Note\n\n- [ ] Ship", expected: "- [ ] Ship\n\nNote" });
+    expect(writtenDescription(puts)).toEqual(doc(note, tasks));
+  });
+
+  it("writes nothing when it cannot tell which of two blocks that read the same the user kept", async () => {
+    const red = paragraph(text("Note", [{ type: "textColor", attrs: { color: "#ff0000" } }]));
+    const issue = { description: doc(red, paragraph(text("Note"))) };
+    const puts = stubJira(issue);
+
+    await expect(
+      writeDescription(connection, {
+        sourceId: SOURCE_ID,
+        text: "Note",
+        expected: "Note\n\nNote",
+        allowedLoss: ["text colour"],
+      }),
+    ).rejects.toThrow("cannot tell which you kept");
+    expect(puts).toEqual([]);
+  });
+
+  it("keeps the empty lines of a description that had nothing else", async () => {
+    const issue = { description: doc(paragraph(), { type: "paragraph", content: [{ type: "hardBreak" }] }) };
+    const puts = stubJira(issue);
+
+    await writeDescription(connection, { sourceId: SOURCE_ID, text: "Plan", expected: "" });
+    expect(writtenDescription(puts)).toEqual(
+      doc(paragraph(text("Plan")), paragraph(), { type: "paragraph", content: [{ type: "hardBreak" }] }),
+    );
+  });
+
+  it("passes on the reason Jira gives for a field it refuses", async () => {
+    const issue = { description: doc(paragraph(text("Old plan"))) };
+    stubJira(issue, {
+      refuse: json({ errorMessages: [], errors: { description: "Operation value must be an Atlassian Document." } }, 400),
+    });
+
+    await expect(
+      writeDescription(connection, { sourceId: SOURCE_ID, text: "Mine", expected: "Old plan" }),
+    ).rejects.toThrow("Jira request failed (400): description: Operation value must be an Atlassian Document.");
+  });
+
   it("writes nothing over a loss the user did not see", async () => {
     // The user saw the underline; a colleague then added colour to the same text.
     const issue = {

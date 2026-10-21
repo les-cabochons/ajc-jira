@@ -6,7 +6,7 @@ import { markdownToAdf } from "./markdown-adf.js";
 export const MAX_DESCRIPTION_LENGTH = 64_000;
 
 /** The most names Ajour takes in `lost`. */
-const MAX_LOST = 20;
+export const MAX_LOST = 20;
 
 /**
  * What `lost` names for a description whose Markdown would not write back as
@@ -22,9 +22,18 @@ function writesBackExactly(markdown: string, context: AdfImageContext) {
 
 /**
  * An issue's description as Ajour syncs it: Markdown, what the conversion
- * from ADF dropped, and whether it was cut to what Ajour stores.
+ * from ADF dropped, and whether it was cut to what Ajour stores. Ajour takes
+ * at most 20 names in `lost`; the write checks every one.
  */
 export function describeJiraDescription(value: unknown, context: AdfImageContext): ConnectorSyncedDescription {
+  const described = describeJiraDescriptionFully(value, context);
+  return described.lost && described.lost.length > MAX_LOST
+    ? { ...described, lost: described.lost.slice(0, MAX_LOST) }
+    : described;
+}
+
+/** The same, with every name of what the conversion dropped. */
+export function describeJiraDescriptionFully(value: unknown, context: AdfImageContext): ConnectorSyncedDescription {
   const converted = adfToMarkdownWithLosses(value, context);
   let text = converted.markdown ?? "";
   let lost = converted.lost;
@@ -39,7 +48,7 @@ export function describeJiraDescription(value: unknown, context: AdfImageContext
   }
   return {
     text,
-    ...(lost.length > 0 ? { lost: lost.slice(0, MAX_LOST) } : {}),
+    ...(lost.length > 0 ? { lost } : {}),
     ...(cut ? { cut: true } : {}),
   };
 }

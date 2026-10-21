@@ -78,6 +78,8 @@ export function adfToMarkdownParts(
 /** The context and losses of the conversion under way. */
 let images: AdfImageContext = {};
 let losses: Set<string> | undefined;
+/** Whether a table cell is being read, where every `|` must be escaped. */
+let inCell = false;
 
 function converting<T>(context: AdfImageContext, convert: () => T): { markdown: T; lost: string[] } {
   const previous = { images, losses };
@@ -488,13 +490,19 @@ function renderCell(cell: AdfNode) {
 
   const children = childrenOf(cell);
   let text: string;
-  if (children.length === 1 && children[0]!.type === "paragraph") {
-    noteAttributes(children[0]!);
-    noteBlockMarks(children[0]!);
-    text = renderInlines(childrenOf(children[0]!));
-  } else {
-    if (children.length > 0) lose("blocks in table cells");
-    text = children.map((child) => renderBlock(child)).filter(Boolean).join(" ");
+  const wasInCell = inCell;
+  inCell = true;
+  try {
+    if (children.length === 1 && children[0]!.type === "paragraph") {
+      noteAttributes(children[0]!);
+      noteBlockMarks(children[0]!);
+      text = renderInlines(childrenOf(children[0]!));
+    } else {
+      if (children.length > 0) lose("blocks in table cells");
+      text = children.map((child) => renderBlock(child)).filter(Boolean).join(" ");
+    }
+  } finally {
+    inCell = wasInCell;
   }
   if (text.includes("\n")) {
     lose("line breaks in table cells");
@@ -813,6 +821,9 @@ function renderInlines(nodes: AdfNode[]): string {
 
 function codeSpan(raw: string) {
   let text = raw;
+  // In a table, `\|` is how a pipe is written, in code too, so code that
+  // holds a backslash before a pipe would come back without the backslash.
+  if (inCell && text.includes("\\|")) lose("other formatting");
   if (text.includes("\n")) {
     lose("other formatting");
     text = text.replace(/\n/g, " ");
@@ -825,7 +836,11 @@ function codeSpan(raw: string) {
 }
 
 function renderAutolink(url: string) {
-  if (/^[a-zA-Z][a-zA-Z0-9+.-]{1,31}:[^\s<>\u0000-\u001F]*$/.test(url)) return `<${url}>`;
+  if (/^[a-zA-Z][a-zA-Z0-9+.-]{1,31}:[^\s<>\u0000-\u001F]*$/.test(url)) {
+    // As in code, an autolink in a table keeps no backslash before a pipe.
+    if (inCell && url.includes("\\|")) lose("other formatting");
+    return `<${url}>`;
+  }
   lose("link previews");
   return `[${escapeText(url)}](${destination(url)})`;
 }

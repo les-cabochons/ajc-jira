@@ -186,9 +186,17 @@ export async function requestJira<T>(
   if (!response.ok) {
     let detail = response.statusText || "Request failed";
     try {
-      const payload = (await response.json()) as { errorMessages?: string[]; message?: string };
+      const payload = (await response.json()) as {
+        errorMessages?: string[];
+        errors?: Record<string, unknown>;
+        message?: string;
+      };
+      // Jira names a refused field's reason in `errors`, by field.
+      const fieldErrors = Object.entries(payload.errors ?? {})
+        .filter((entry): entry is [string, string] => typeof entry[1] === "string" && entry[1].trim().length > 0)
+        .map(([field, message]) => `${field}: ${message.trim()}`);
       detail =
-        payload.errorMessages?.join("; ").trim() ||
+        [...(payload.errorMessages ?? []), ...fieldErrors].join("; ").trim() ||
         payload.message?.trim() ||
         detail;
     } catch {

@@ -2,10 +2,15 @@ import type {
   BacklogWriteDescriptionRequest,
   BacklogWriteDescriptionResult,
 } from "./contract.js";
-import { patchDescriptionAdf } from "./description-patch.js";
+import { describeJiraDescriptionFully, MAX_LOST } from "./description.js";
+import { patchDescriptionAdf, rebuiltBlocks } from "./description-patch.js";
 import { fetchDescribedIssue, requireIssueKey } from "./description-source.js";
 import { buildIssueUrl, describeIssue, requestJira, type JiraConnectionInput } from "./jira.js";
-import { markdownToAdf } from "./markdown-adf.js";
+import { markdownToAdf, type AdfDocument } from "./markdown-adf.js";
+
+function isDocument(value: unknown): value is { type: "doc"; content: unknown[] } {
+  return typeof value === "object" && value !== null && (value as { type?: unknown }).type === "doc";
+}
 
 /**
  * The longest description Jira Cloud takes, 32,767 characters. Jira does
@@ -32,6 +37,7 @@ export async function writeJiraDescription(
 ): Promise<BacklogWriteDescriptionResult> {
   const key = requireIssueKey(request.sourceId);
   const issue = await fetchDescribedIssue(config, key);
+  const context = { issueUrl: buildIssueUrl(config, issue.key ?? key), attachments: issue.fields?.attachment };
   const current = describeIssue(config, issue);
   if (current.text !== request.expected) {
     return { outcome: "conflict", description: current };
@@ -39,22 +45,37 @@ export async function writeJiraDescription(
   // The same text can come from formatting a colleague added since Ajour read
   // it, which the write would erase. Lossy text is written only when the user
   // saw each of its losses and saved anyway; even then, the blocks they did
-  // not change keep their ADF, formatting included. Cut text never is.
-  const unseen = (current.lost ?? []).filter((loss) => !(request.allowedLoss ?? []).includes(loss));
-  if (current.cut || unseen.length > 0) {
+  // not change keep their ADF, formatting included. Cut text never is, nor
+  // text that loses more than the names Ajour can show.
+  const allowed = request.allowedLoss ?? [];
+  const lost = describeJiraDescriptionFully(issue.fields?.description, context).lost ?? [];
+  const unseen = lost.filter((loss) => !allowed.includes(loss));
+  if (current.cut || lost.length > MAX_LOST || unseen.length > 0) {
     throw new Error(
       current.cut
         ? "This description is longer than Ajour keeps. Edit it in Jira."
-        : `Writing it would lose its ${unseen.join(", ")} in Jira. Edit it there.`,
+        : lost.length > MAX_LOST
+          ? "This description loses more kinds of formatting than Ajour can name. Edit it in Jira."
+          : `Writing it would lose its ${unseen.join(", ")} in Jira. Edit it there.`,
     );
   }
 
-  const context = { issueUrl: buildIssueUrl(config, issue.key ?? key), attachments: issue.fields?.attachment };
-  const description = request.text.trim()
-    ? current.text
-      ? patchDescriptionAdf(issue.fields?.description, request.text, context)
-      : markdownToAdf(request.text)
-    : null;
+  let description: AdfDocument | null = null;
+  if (request.text.trim()) {
+    const source = issue.fields?.description;
+    description = isDocument(source) ? patchDescriptionAdf(source, request.text, context) : markdownToAdf(request.text);
+    // Every block whose Markdown the user left alone must be written as it
+    // was; one that is not loses only what the user allowed, or nothing goes.
+    for (const block of isDocument(source) ? rebuiltBlocks(source, description, request.text, context) : []) {
+      const blockLost =
+        describeJiraDescriptionFully({ type: "doc", version: 1, content: [block] }, context).lost ?? [];
+      if (blockLost.length === 0 || blockLost.some((loss) => !allowed.includes(loss))) {
+        throw new Error(
+          "Ajour cannot write this edit without changing parts of the description you did not edit. Edit it in Jira.",
+        );
+      }
+    }
+  }
   const size = JSON.stringify(description).length;
   if (description && size > JIRA_DESCRIPTION_MAX_LENGTH) {
     throw new Error(

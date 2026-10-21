@@ -71,7 +71,9 @@ Document Format (ADF), which a dependency-free converter turns into Markdown:
   row, merged cells, column widths, cell colours, table width, numbered rows,
   blocks and line breaks in table cells, line breaks in headings, spaces at a
   line's start or end ("spacing"), emphasis on spaces at its edges
-  ("formatting on spaces"), empty lines inside a block, and emphasis on code.
+  ("formatting on spaces"), empty lines inside a block, emphasis on code, and
+  a backslash before a pipe in a table cell's code, which GFM tables cannot
+  keep. Jira's default table width, 760, is not a loss.
   Any node, mark or attribute the converter does not know is "other
   formatting". A description whose Markdown would not write back as itself is
   "formatting Ajour cannot write back".
@@ -93,10 +95,19 @@ one GET of its description and attachments.
   cut, it writes nothing; if it is lossy, it writes only when each loss is in
   the request's `allowedLoss`.
 - Every top-level block the edit leaves alone keeps its ADF exactly, with the
-  formatting Markdown cannot hold, and so do the empty paragraphs between
-  blocks wherever the blank line there stayed. Only changed blocks are
-  written from the Markdown, and a kept block that Markdown would read as one
-  with the change joins it.
+  formatting Markdown cannot hold, ids included, where the user left it or
+  moved it, and so do the empty paragraphs between blocks wherever the blank
+  line there stayed. Only changed blocks are written from the Markdown, and a
+  kept block that Markdown would read as one with the change joins it. A
+  description of empty paragraphs only keeps them after the new text.
+- A check runs on the result: every source block whose Markdown the edit kept
+  must be in the write as it was. One that is not must lose only what the
+  user allowed, or nothing is written.
+- Blocks that read the same but differ in Jira are kept only where every
+  optimal line alignment agrees on which one stayed; otherwise, as when one of
+  two is deleted, nothing is written and the error says to edit in Jira.
+- Losses beyond the 20 names Ajour shows are checked too: such a description
+  is never written.
 - A description longer than Jira's 32,767 characters, measured as the ADF's
   JSON, is refused with the count. An empty text clears the description.
 

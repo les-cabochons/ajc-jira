@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { adfToMarkdown, adfToMarkdownParts } from "../src/adf-markdown.ts";
-import { patchDescriptionAdf } from "../src/description-patch.ts";
+import { patchDescriptionAdf, rebuiltBlocks } from "../src/description-patch.ts";
 import { describeJiraDescription, NOT_WRITABLE_EXACTLY } from "../src/description.ts";
 import { markdownToAdf } from "../src/markdown-adf.ts";
 
@@ -196,22 +196,53 @@ describe("generated descriptions", () => {
       (parts: string[], at: number) => parts.map((part, index) => (index === at ? `${part}\n\n- added` : part)),
       (parts: string[], at: number) => parts.map((part, index) => (index === at ? `- added\n\n${part}` : part)),
       (parts: string[], at: number) => parts.map((part, index) => (index === at ? `${part}\n  indented` : part)),
+      // Moves and duplicates.
+      (parts: string[], at: number) => [parts[at]!, ...parts.filter((_, index) => index !== at)],
+      (parts: string[], at: number) => [...parts.filter((_, index) => index !== at), parts[at]!],
+      (parts: string[], at: number) => [...parts, parts[at]!],
     ];
+    let refused = 0;
+    let checked = 0;
     for (let seed = 1; seed <= 2000 && failures.length < 4; seed += 1) {
       const next = random(seed);
       const value = generate(next);
-      const source = { ...value, content: value.content.flatMap((node) => (next() < 0.3 ? [{ type: "paragraph" }, node] : [node])) };
+      // Every block has its own id, so keeping it means keeping that very block.
+      const content = value.content.map((node, index) => ({ ...node, attrs: { ...(node.attrs ?? {}), localId: `b${index}` } }));
+      const source = { ...value, content: content.flatMap((node) => (next() < 0.3 ? [{ type: "paragraph" }, node] : [node])) };
       if (describeJiraDescription(source, context).lost?.includes(NOT_WRITABLE_EXACTLY)) continue;
       const read = adfToMarkdownParts(source, context)!;
       const at = Math.floor(next() * read.parts.length);
       const edit = edits[Math.floor(next() * edits.length)]!;
       const markdown = edit(read.parts.map((part) => part.markdown), at).join("\n\n");
-      const written = patchDescriptionAdf(source, markdown, context);
+      let written;
+      try {
+        written = patchDescriptionAdf(source, markdown, context);
+      } catch (error) {
+        // An ambiguous edit is refused, never guessed.
+        expect(String(error)).toMatch(/cannot tell which you kept/);
+        refused += 1;
+        continue;
+      }
+      checked += 1;
       const expected = adfToMarkdown(markdownToAdf(markdown), context) ?? "";
       if ((adfToMarkdown(written, context) ?? "") !== expected) {
-        failures.push({ seed, markdown, expected, written: adfToMarkdown(written, context) });
+        failures.push({ seed, kind: "reads", markdown, expected, written: adfToMarkdown(written, context) });
       }
+      // The source-level guard: every block whose Markdown the edit kept is
+      // in the write as its very source ADF, ids and attributes included.
+      const rebuilt = rebuiltBlocks(source, written, markdown, context);
+      if (rebuilt.length > 0) failures.push({ seed, kind: "rebuilt", markdown, rebuilt: JSON.stringify(rebuilt) });
     }
     expect(failures).toEqual([]);
+    expect(refused).toBeLessThan(checked / 10);
+  });
+
+  it("names the source blocks a write rebuilt though their Markdown stayed", () => {
+    const keep = { type: "paragraph", attrs: { localId: "k" }, content: [{ type: "text", text: "Keep" }] };
+    const source = { type: "doc", version: 1, content: [keep, { type: "paragraph", content: [{ type: "text", text: "Old" }] }] };
+    const rebuilt = markdownToAdf("Keep\n\nNew");
+
+    expect(rebuiltBlocks(source, rebuilt, "Keep\n\nNew", context)).toEqual([keep]);
+    expect(rebuiltBlocks(source, patchDescriptionAdf(source, "Keep\n\nNew", context), "Keep\n\nNew", context)).toEqual([]);
   });
 });

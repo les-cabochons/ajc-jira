@@ -167,6 +167,7 @@ describe("what the reader cannot keep is named", () => {
     ["numbered table rows", doc({ type: "table", attrs: { isNumberColumnEnabled: true }, content: [{ type: "tableRow", content: [cell("tableHeader", text("a"))] }] }), ["numbered table rows"]],
     ["blocks in table cells", doc({ type: "table", content: [{ type: "tableRow", content: [{ type: "tableHeader", content: [p(text("a")), p(text("b"))] }] }] }), ["blocks in table cells"]],
     ["line breaks in table cells", doc({ type: "table", content: [{ type: "tableRow", content: [cell("tableHeader", text("a"), br, text("b"))] }] }), ["line breaks in table cells"]],
+    ["a backslash before a pipe in a table cell's code", doc({ type: "table", content: [{ type: "tableRow", content: [cell("tableHeader", text("a\\|b", [code]))] }] }), ["other formatting"]],
     ["rows of different lengths", doc({ type: "table", content: [{ type: "tableRow", content: [cell("tableHeader", text("a")), cell("tableHeader", text("b"))] }, { type: "tableRow", content: [cell("tableCell", text("c"))] }] }), ["other formatting"]],
     ["image captions", doc({ type: "mediaSingle", attrs: { layout: "center" }, content: [file("f"), { type: "caption", content: [text("c")] }] }), ["image captions"]],
     ["image borders", doc({ type: "mediaSingle", attrs: { layout: "center" }, content: [{ ...file("f"), marks: [{ type: "border", attrs: { size: 1, color: "#000000" } }] }] }), ["image borders"]],

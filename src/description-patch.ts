@@ -1,58 +1,96 @@
-import { adfToMarkdownParts, type AdfImageContext } from "./adf-markdown.js";
+import { adfToMarkdownParts, type AdfImageContext, type AdfNode } from "./adf-markdown.js";
 import { markdownToAdf, type AdfDocument, type AdfOutNode } from "./markdown-adf.js";
 
 // Writes an edited description back into its ADF, keeping every top-level
 // block the user did not change exactly as it was, attributes and formatting
 // Markdown cannot hold included, and the empty paragraphs between blocks
 // wherever the blank line there stayed. Only what changed is written from
-// the Markdown.
+// the Markdown. A block found where the user moved it is kept too. When
+// blocks that read the same differ in Jira and the edit leaves it open which
+// one stayed, the write is refused rather than guessed.
 
 /** Past this many line pairs, a line diff costs too much; only the edges are matched. */
 const MAX_DIFF_CELLS = 4_000_000;
 
+export const AMBIGUOUS_EDIT =
+  "This edit moves or removes blocks that read the same but differ in Jira, so Ajour cannot tell which you kept. Edit the description in Jira.";
+
 /**
- * For each line of `before`, the line of `after` it stays as, or -1: the
- * lines both start and end with, then a longest common subsequence between.
+ * A longest common subsequence line diff, weighing every optimal alignment.
+ * `match` is one of them; a line is `certain` when every optimal alignment
+ * matches it to that same line, and `optional` when some match it and some do
+ * not, or match it elsewhere. Undefined past the size budget.
  */
-function matchLines(before: string[], after: string[]): number[] {
+function alignLines(before: string[], after: string[]) {
+  const n = before.length;
+  const m = after.length;
+  const width = m + 1;
+  if ((n + 1) * width > MAX_DIFF_CELLS) return undefined;
+  // Longest common subsequences of the prefixes, and of the suffixes.
+  const prefix = new Uint32Array((n + 1) * width);
+  for (let i = 1; i <= n; i += 1) {
+    for (let j = 1; j <= m; j += 1) {
+      prefix[i * width + j] =
+        before[i - 1] === after[j - 1]
+          ? prefix[(i - 1) * width + j - 1]! + 1
+          : Math.max(prefix[(i - 1) * width + j]!, prefix[i * width + j - 1]!);
+    }
+  }
+  const suffix = new Uint32Array((n + 1) * width);
+  for (let i = n - 1; i >= 0; i -= 1) {
+    for (let j = m - 1; j >= 0; j -= 1) {
+      suffix[i * width + j] =
+        before[i] === after[j]
+          ? suffix[(i + 1) * width + j + 1]! + 1
+          : Math.max(suffix[(i + 1) * width + j]!, suffix[i * width + j + 1]!);
+    }
+  }
+  const total = suffix[0]!;
+
+  const match = new Array<number>(n).fill(-1);
+  for (let i = 0, j = 0; i < n && j < m; ) {
+    if (before[i] === after[j] && suffix[i * width + j] === suffix[(i + 1) * width + j + 1]! + 1) {
+      match[i] = j;
+      i += 1;
+      j += 1;
+    } else if (suffix[(i + 1) * width + j]! >= suffix[i * width + j + 1]!) {
+      i += 1;
+    } else {
+      j += 1;
+    }
+  }
+
+  const certain = new Array<boolean>(n).fill(false);
+  const optional = new Array<boolean>(n).fill(false);
+  for (let i = 0; i < n; i += 1) {
+    let pairs = 0;
+    let skippable = false;
+    for (let j = 0; j <= m; j += 1) {
+      if (prefix[i * width + j]! + suffix[(i + 1) * width + j]! === total) skippable = true;
+      if (j < m && before[i] === after[j] && prefix[i * width + j]! + 1 + suffix[(i + 1) * width + j + 1]! === total) {
+        pairs += 1;
+      }
+    }
+    certain[i] = pairs === 1 && !skippable;
+    optional[i] = pairs > 0 && !certain[i];
+  }
+  return { match, certain, optional };
+}
+
+/** The lines both start and end with, when a full diff costs too much. */
+function edgeMatch(before: string[], after: string[]) {
   const match = new Array<number>(before.length).fill(-1);
   let head = 0;
   while (head < before.length && head < after.length && before[head] === after[head]) {
     match[head] = head;
     head += 1;
   }
-  let tail = 0;
-  while (
-    tail < before.length - head &&
-    tail < after.length - head &&
-    before[before.length - 1 - tail] === after[after.length - 1 - tail]
+  for (
+    let tail = 0;
+    tail < before.length - head && tail < after.length - head && before[before.length - 1 - tail] === after[after.length - 1 - tail];
+    tail += 1
   ) {
     match[before.length - 1 - tail] = after.length - 1 - tail;
-    tail += 1;
-  }
-  const n = before.length - head - tail;
-  const m = after.length - head - tail;
-  if ((n + 1) * (m + 1) > MAX_DIFF_CELLS) return match;
-  const width = m + 1;
-  const lcs = new Uint32Array((n + 1) * width);
-  for (let i = n - 1; i >= 0; i -= 1) {
-    for (let j = m - 1; j >= 0; j -= 1) {
-      lcs[i * width + j] =
-        before[head + i] === after[head + j]
-          ? lcs[(i + 1) * width + j + 1]! + 1
-          : Math.max(lcs[(i + 1) * width + j]!, lcs[i * width + j + 1]!);
-    }
-  }
-  for (let i = 0, j = 0; i < n && j < m; ) {
-    if (before[head + i] === after[head + j]) {
-      match[head + i] = head + j;
-      i += 1;
-      j += 1;
-    } else if (lcs[(i + 1) * width + j]! >= lcs[i * width + j + 1]!) {
-      i += 1;
-    } else {
-      j += 1;
-    }
   }
   return match;
 }
@@ -61,24 +99,38 @@ function isBlank(line: string | undefined) {
   return line !== undefined && /^[ \t]*$/.test(line);
 }
 
+/** A node as JSON without the ids that only name it. */
+function withoutIds(node: unknown): string {
+  return JSON.stringify(node, (key, value) => (key === "localId" ? undefined : value));
+}
+
+function editedLines(markdown: string) {
+  return markdown.replace(/\r\n?/g, "\n").replace(/^(?:[ \t]*\n)+|(?:\n[ \t]*)+$/g, "").split("\n");
+}
+
+/** The blocks Markdown makes, each as it reads back. */
+function blocksOf(text: string, context: AdfImageContext) {
+  return (adfToMarkdownParts(markdownToAdf(text), context)?.parts ?? []).map((part) => part.markdown);
+}
+
 /**
  * The ADF for `markdown`, an edit of the description `source` holds. Each
- * top-level block whose Markdown the edit kept, whole and set apart by blank
- * lines, stays the block it was; the rest is written from the Markdown. The
- * pieces must read as the whole Markdown does: a kept block that the Markdown
- * around it would read otherwise, as a list right above new list items, joins
- * the change, and the write is tried again.
+ * top-level block whose Markdown the edit kept, whole and in order, or moved
+ * whole, stays the block it was, where it is now; the rest is written from the
+ * Markdown. The pieces must read as the whole Markdown does: a kept block
+ * that the Markdown around it would read otherwise, as a list right above new
+ * list items, joins the change. Throws `AMBIGUOUS_EDIT` when blocks that read
+ * the same but differ in ADF could have stayed in more than one way.
  */
 export function patchDescriptionAdf(source: unknown, markdown: string, context: AdfImageContext): AdfDocument {
-  const after = markdown.replace(/\r\n?/g, "\n").replace(/^(?:[ \t]*\n)+|(?:\n[ \t]*)+$/g, "").split("\n");
+  const after = editedLines(markdown);
   const whole = markdownToAdf(after.join("\n"));
   const read = adfToMarkdownParts(source, context);
-  if (!read || read.parts.length === 0) return whole;
+  if (!read) return whole;
   const { content, parts } = read;
-  /** The blocks Markdown makes, each as it reads back. */
-  const blocksOf = (text: string) =>
-    (adfToMarkdownParts(markdownToAdf(text), context)?.parts ?? []).map((part) => part.markdown);
-  const target = JSON.stringify(blocksOf(after.join("\n")));
+  // A description of empty lines only keeps them after the new text.
+  if (parts.length === 0) return { ...whole, content: [...whole.content, ...(content as AdfOutNode[])] };
+  const target = JSON.stringify(blocksOf(after.join("\n"), context));
 
   // Each part's lines in the Markdown read from the source, and the blank
   // line that stands for the gap before each part after the first.
@@ -93,25 +145,70 @@ export function patchDescriptionAdf(source: unknown, markdown: string, context: 
     before.push(...part.markdown.split("\n"));
     return { start, end: before.length };
   });
-  const match = matchLines(before, after);
+  const aligned = alignLines(before, after);
+  const match = aligned?.match ?? edgeMatch(before, after);
   // The gaps whose blank line stayed, by the line it stayed as.
   const gapAfterLine = new Map<number, number>();
   for (const [line, gap] of gapAtLine) {
     if (match[line]! >= 0) gapAfterLine.set(match[line]!, gap);
   }
 
-  // A part is kept when all its lines stay, together and in order, with a
-  // blank line or an edge on each side.
-  const placed = spans.map(({ start, end }) => {
+  // A part is kept when all its lines stay, together and in order. Whether
+  // the text around it lets it stand alone is checked once the pieces are set.
+  const placed: ({ start: number; end: number } | undefined)[] = spans.map(({ start, end }) => {
     const first = match[start]!;
     if (first === -1) return undefined;
     for (let line = start; line < end; line += 1) {
       if (match[line] !== first + (line - start)) return undefined;
     }
-    const last = first + (end - start);
-    const apart = (first === 0 || isBlank(after[first - 1])) && (last === after.length || isBlank(after[last]));
-    return apart ? { start: first, end: last } : undefined;
+    return { start: first, end: first + (end - start) };
   });
+
+  // Parts that read the same, and whether their ADF differs beyond ids.
+  const groups = new Map<string, number[]>();
+  parts.forEach((part, index) => groups.set(part.markdown, [...(groups.get(part.markdown) ?? []), index]));
+  const differs = (members: number[]) =>
+    new Set(members.map((index) => withoutIds(content[parts[index]!.index]))).size > 1;
+  for (const members of groups.values()) {
+    if (members.length < 2 || !differs(members)) continue;
+    // Without a full diff, which of them stayed is unknown.
+    if (!aligned) throw new Error(AMBIGUOUS_EDIT);
+    for (const index of members) {
+      const { start, end } = spans[index]!;
+      for (let line = start; line < end; line += 1) {
+        if (aligned.optional[line] || (placed[index] && !aligned.certain[line])) throw new Error(AMBIGUOUS_EDIT);
+      }
+    }
+  }
+
+  // Blocks the diff did not keep in order, found whole elsewhere: moved.
+  const taken = new Set<number>();
+  placed.forEach((place) => {
+    for (let line = place?.start ?? 0; place && line < place.end; line += 1) taken.add(line);
+  });
+  for (const [text, members] of groups) {
+    const unplaced = members.filter((index) => !placed[index]);
+    if (unplaced.length === 0) continue;
+    const lines = text.split("\n");
+    const found: number[] = [];
+    for (let start = 0; start + lines.length <= after.length; start += 1) {
+      let free = true;
+      for (let offset = 0; offset < lines.length && free; offset += 1) {
+        free = after[start + offset] === lines[offset] && !taken.has(start + offset);
+      }
+      if (free) {
+        found.push(start);
+        start += lines.length - 1;
+      }
+    }
+    if (found.length === 0) continue;
+    if (unplaced.length > 1 && differs(unplaced)) throw new Error(AMBIGUOUS_EDIT);
+    unplaced.slice(0, found.length).forEach((index, order) => {
+      const start = found[order]!;
+      placed[index] = { start, end: start + lines.length };
+      for (let line = start; line < start + lines.length; line += 1) taken.add(line);
+    });
+  }
 
   /** The empty paragraphs and other blocks with no Markdown between two parts. */
   const gapNodes = (gap: number) => content.slice(parts[gap]!.index + 1, parts[gap + 1]!.index);
@@ -159,26 +256,83 @@ export function patchDescriptionAdf(source: unknown, markdown: string, context: 
       const { document, pieces } = build(splitAtGaps);
       // Kept blocks read as they did, even one whose Markdown would not
       // write back as itself: the user left it alone.
-      if (JSON.stringify(pieces.flatMap(blocksOf)) === target) return document;
+      if (JSON.stringify(pieces.flatMap((piece) => blocksOf(piece, context))) === target) return document;
     }
     if (placed.every((place) => !place)) return build(false).document;
-    // The kept blocks next to changed text join it, and the write is tried again.
+    // The kept blocks next to changed text join it, and the write is tried
+    // again. `rebuiltBlocks` then tells the write which source blocks went.
     const kept = new Set<number>();
     for (const place of placed) {
       for (let line = place?.start ?? 0; place && line < place.end; line += 1) kept.add(line);
     }
-    const touchesChange = (from: number, step: number) => {
+    // First the blocks the changed text touches, then those a blank line
+    // away from it.
+    const touchesChange = (from: number, step: number, acrossBlanks: boolean) => {
       let line = from;
-      while (line >= 0 && line < after.length && isBlank(after[line])) line += step;
-      return line >= 0 && line < after.length && !kept.has(line);
+      while (acrossBlanks && line >= 0 && line < after.length && isBlank(after[line])) line += step;
+      return line >= 0 && line < after.length && !isBlank(after[line]) && !kept.has(line);
     };
     let unkept = false;
-    placed.forEach((place, index) => {
-      if (place && (touchesChange(place.start - 1, -1) || touchesChange(place.end, 1))) {
-        placed[index] = undefined;
-        unkept = true;
-      }
-    });
+    for (const acrossBlanks of [false, true]) {
+      placed.forEach((place, index) => {
+        if (
+          place &&
+          (touchesChange(place.start - 1, -1, acrossBlanks) || touchesChange(place.end, 1, acrossBlanks))
+        ) {
+          placed[index] = undefined;
+          unkept = true;
+        }
+      });
+      if (unkept) break;
+    }
     if (!unkept) placed.fill(undefined);
   }
+}
+
+/**
+ * The source's top-level blocks whose Markdown the edit kept but which the
+ * written ADF does not hold as they were, ids and attributes included. A
+ * block counts as kept as many times as the edit, read whole, still holds its
+ * Markdown as a block, and as present as many times as the written ADF holds
+ * a block deep-equal to it.
+ */
+export function rebuiltBlocks(
+  source: unknown,
+  written: { content: unknown[] },
+  markdown: string,
+  context: AdfImageContext,
+): AdfNode[] {
+  const read = adfToMarkdownParts(source, context);
+  if (!read || read.parts.length === 0) return [];
+  const edited = blocksOf(editedLines(markdown).join("\n"), context);
+  const writtenJson = written.content.map((node) => JSON.stringify(node));
+  const used = new Set<number>();
+  const byKey = new Map<string, AdfNode[]>();
+  for (const part of read.parts) {
+    const key = JSON.stringify(blocksOf(part.markdown, context));
+    byKey.set(key, [...(byKey.get(key) ?? []), read.content[part.index]!]);
+  }
+  const rebuilt: AdfNode[] = [];
+  for (const [key, nodes] of byKey) {
+    const blocks = JSON.parse(key) as string[];
+    if (blocks.length === 0) continue;
+    // How many times the edit still holds these blocks, one after another.
+    let kept = 0;
+    for (let at = 0; at + blocks.length <= edited.length; at += 1) {
+      if (blocks.every((block, offset) => edited[at + offset] === block)) {
+        kept += 1;
+        at += blocks.length - 1;
+      }
+    }
+    const missing: AdfNode[] = [];
+    for (const node of nodes) {
+      const json = JSON.stringify(node);
+      const found = writtenJson.findIndex((candidate, index) => !used.has(index) && candidate === json);
+      if (found === -1) missing.push(node);
+      else used.add(found);
+    }
+    const present = nodes.length - missing.length;
+    rebuilt.push(...missing.slice(0, Math.max(0, Math.min(nodes.length, kept) - present)));
+  }
+  return rebuilt;
 }
