@@ -6,7 +6,7 @@ import type {
   ConnectorSyncWorkItemUpdate,
   JiraQueryScope,
 } from "./contract.js";
-import { adfToMarkdown } from "./adf-markdown.js";
+import { describeJiraDescription } from "./description.js";
 import { resolveEstimateSyncAction } from "./estimate-sync.js";
 import { jiraPriorityToLevel } from "./priority.js";
 
@@ -132,6 +132,14 @@ export function buildIssueUrl(config: JiraConnectionInput, issueKey: string) {
   return `${normalizeBaseUrl(config.baseUrl)}/browse/${issueKey}`;
 }
 
+/** The issue's description as Ajour syncs it, its images pointing at its attachments. */
+export function describeIssue(config: JiraConnectionInput, issue: JiraIssue) {
+  return describeJiraDescription(issue.fields?.description, {
+    issueUrl: buildIssueUrl(config, issue.key),
+    attachments: issue.fields?.attachment,
+  });
+}
+
 export function buildJql(config: JiraConnectionInput, issueKeys?: string[]) {
   const clauses: string[] = [];
 
@@ -178,9 +186,17 @@ export async function requestJira<T>(
   if (!response.ok) {
     let detail = response.statusText || "Request failed";
     try {
-      const payload = (await response.json()) as { errorMessages?: string[]; message?: string };
+      const payload = (await response.json()) as {
+        errorMessages?: string[];
+        errors?: Record<string, unknown>;
+        message?: string;
+      };
+      // Jira names a refused field's reason in `errors`, by field.
+      const fieldErrors = Object.entries(payload.errors ?? {})
+        .filter((entry): entry is [string, string] => typeof entry[1] === "string" && entry[1].trim().length > 0)
+        .map(([field, message]) => `${field}: ${message.trim()}`);
       detail =
-        payload.errorMessages?.join("; ").trim() ||
+        [...(payload.errorMessages ?? []), ...fieldErrors].join("; ").trim() ||
         payload.message?.trim() ||
         detail;
     } catch {
@@ -213,6 +229,7 @@ export async function searchIssues(
       "priority",
       "parent",
       "subtasks",
+      "attachment",
       ...additionalFields,
     ])),
   };
@@ -379,7 +396,8 @@ function mapIssueToCandidate(
   const state = getStatusName(issue);
   const assignedTo = normalizeDisplayValue(issue.fields?.assignee);
   const projectName = normalizeDisplayValue(issue.fields?.project);
-  const note = adfToMarkdown(issue.fields?.description);
+  const description = describeIssue(config, issue);
+  const note = description.text || undefined;
   const originalEstimateHours = fieldIds?.originalEstimateFieldId
     ? parseEstimateValue(issue.fields?.[fieldIds.originalEstimateFieldId])
     : undefined;
@@ -410,6 +428,7 @@ function mapIssueToCandidate(
       sourceUrl: buildIssueUrl(config, issue.key),
       title,
       note: note ? clampNote(note) : undefined,
+      description,
       projectName,
       workItemType: issueType,
       state,
@@ -449,6 +468,7 @@ function mapIssueToCandidate(
     sourceUrl: buildIssueUrl(config, issue.key),
     title,
     note: note ? clampNote(note) : undefined,
+    description,
     projectName,
     workItemType: issueType,
     state,
@@ -727,6 +747,7 @@ async function findDoneIssues(
         externalId: issue.key,
         sourceUrl: sourceId,
         title: normalizeDisplayValue(issue.fields?.summary) ?? issue.key,
+        description: describeIssue(config, issue),
         projectName: normalizeDisplayValue(issue.fields?.project),
         workItemType:
           normalizeDisplayValue((issue.fields?.issuetype as { name?: string } | undefined)?.name) ?? "Issue",

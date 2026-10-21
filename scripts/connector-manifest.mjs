@@ -135,6 +135,18 @@ export function assertConnectorPluginManifest(manifest) {
   }
   const connector = manifest.capabilities.connector;
   assertOptionalBoolean(connector?.settle, "Connector manifest capabilities.connector.settle");
+  if (connector?.description !== undefined) {
+    const label = "Connector manifest capabilities.connector.description";
+    assertRecord(connector.description, label);
+    assertOptionalBoolean(connector.description.write, label + ".write");
+    const maxLength = connector.description.maxLength;
+    if (
+      maxLength !== undefined &&
+      (!Number.isInteger(maxLength) || maxLength < 1 || maxLength > 10_000_000)
+    ) {
+      throw new Error(label + ".maxLength must be an integer from 1 to 10,000,000.");
+    }
+  }
 
   assertString(manifest.displayName, "Connector manifest displayName", {
     min: 1,

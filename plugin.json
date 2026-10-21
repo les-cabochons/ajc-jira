@@ -8,7 +8,8 @@
   "entrypoint": "dist/plugin.js",
   "capabilities": {
     "connector": {
-      "settle": true
+      "settle": true,
+      "description": { "write": true, "maxLength": 32767 }
     }
   },
   "connectionFields": [
@@ -16,7 +17,7 @@
     { "id": "tenantLabel", "label": "Workspace", "type": "text", "required": true, "placeholder": "Acme Jira" },
     { "id": "baseUrl", "label": "Site URL", "type": "url", "required": true, "placeholder": "https://your-domain.atlassian.net" },
     { "id": "email", "label": "Email", "type": "text", "required": true, "placeholder": "name@example.com" },
-    { "id": "apiToken", "label": "API token", "type": "password", "required": true, "secret": true, "placeholder": "Atlassian API token" },
+    { "id": "apiToken", "label": "API token", "type": "password", "required": true, "secret": true, "placeholder": "Atlassian API token", "helpText": "Syncing needs the Browse projects permission, or the read:jira-work scope for a scoped token. Writing estimates, settles and descriptions needs Edit issues, or write:jira-work." },
     { "id": "projectKey", "label": "Project key", "type": "text", "placeholder": "Optional: ENG" },
     {
       "id": "queryScope",
