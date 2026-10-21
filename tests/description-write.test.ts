@@ -391,6 +391,51 @@ describe("writeDescription", () => {
     expect(writtenDescription(puts)).toEqual(doc(paragraph(text("A"), lineBreak, text("b"))));
   });
 
+  it("keeps a hard break exactly when its paragraph is split after the next line", async () => {
+    const first = { type: "hardBreak", attrs: { localId: "break-1", text: "\n" } };
+    const puts = stubJira({ description: doc(paragraph(text("a"), first, text("b"), { type: "hardBreak" }, text("c"))) });
+
+    await writeDescription(connection, { sourceId: SOURCE_ID, text: "a\nb\n\nc", expected: "a\nb\nc" });
+    expect(writtenDescription(puts)).toEqual(doc(paragraph(text("a"), first, text("b")), paragraph(text("c"))));
+  });
+
+  it("keeps the hard breaks of two paragraphs the user joins", async () => {
+    const first = { type: "hardBreak", attrs: { localId: "break-1", text: "\n" } };
+    const second = { type: "hardBreak", attrs: { localId: "break-2", text: "\n" } };
+    const puts = stubJira({
+      description: doc(paragraph(text("a"), first, text("b")), paragraph(text("c"), second, text("d"))),
+    });
+
+    await writeDescription(connection, { sourceId: SOURCE_ID, text: "a\nb\nc\nd", expected: "a\nb\n\nc\nd" });
+    expect(writtenDescription(puts)).toEqual(
+      doc(paragraph(text("a"), first, text("b"), { type: "hardBreak" }, text("c"), second, text("d"))),
+    );
+  });
+
+  it("lets a hard break with an id go when the user splits its paragraph at it", async () => {
+    const first = { type: "hardBreak", attrs: { localId: "break-1", text: "\n" } };
+    const second = { type: "hardBreak", attrs: { localId: "break-2", text: "\n" } };
+    const puts = stubJira({ description: doc(paragraph(text("a"), first, text("b"), second, text("c"))) });
+
+    await writeDescription(connection, { sourceId: SOURCE_ID, text: "a\n\nb\nc", expected: "a\nb\nc" });
+    expect(writtenDescription(puts)).toEqual(doc(paragraph(text("a")), paragraph(text("b"), second, text("c"))));
+  });
+
+  it("keeps the empty line that ends a quote when the user splits the quote's last paragraph", async () => {
+    const lineBreak = { type: "hardBreak", attrs: { localId: "break-1", text: "\n" } };
+    const empty = { type: "paragraph", attrs: { localId: "empty-1" } };
+    const quote = (...content: unknown[]) => ({ type: "blockquote", attrs: { localId: "q" }, content });
+    const puts = stubJira({ description: doc(quote(paragraph(text("a"), lineBreak, text("b")), empty)) });
+
+    await writeDescription(connection, {
+      sourceId: SOURCE_ID,
+      text: "> a\n>\n> b",
+      expected: "> a\n> b",
+      allowedLoss: ["empty lines"],
+    });
+    expect(writtenDescription(puts)).toEqual(doc(quote(paragraph(text("a")), paragraph(text("b")), empty)));
+  });
+
   it("keeps hard breaks in order when the lines on both sides change and their count stays", async () => {
     const lineBreak = { type: "hardBreak", attrs: { text: "\n", localId: "break-1" } };
     const puts = stubJira({ description: doc(paragraph(text("a"), lineBreak, text("b"))) });

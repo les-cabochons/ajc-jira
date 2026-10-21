@@ -3,6 +3,7 @@ import { markdownToAdf, type AdfDocument, type AdfOutNode } from "./markdown-adf
 import {
   AMBIGUOUS_EDIT,
   alignLines,
+  placeBoundaryNodes,
   reconcileDocument,
   restoreKeptNodes,
   withoutIdentity,
@@ -160,9 +161,13 @@ export function patchDescriptionAdf(source: unknown, markdown: string, context: 
   const reconcile = (document: AdfDocument): AdfDocument => {
     const reconciled = {
       ...document,
-      content: restoreKeptNodes(
+      content: placeBoundaryNodes(
         content,
-        reconcileDocument(content, parts.map((part) => content[part.index]!), document.content as AdfNode[], context),
+        restoreKeptNodes(
+          content,
+          reconcileDocument(content, parts.map((part) => content[part.index]!), document.content as AdfNode[], context),
+          context,
+        ),
         context,
       ) as AdfOutNode[],
     };

@@ -125,8 +125,19 @@ one GET of its description and attachments.
   break stays the break after its line, or before the next line, when that
   line is kept and still has a break on that side; an empty block likewise
   next to a kept block, and at the start or the end of its block. The rest
-  pair in order when as many are left on each side. A source one left over
-  that carries an id or attributes cannot be placed, and nothing is written.
+  pair in order when as many are left on each side. A break beside a kept
+  line with no break left on its side was removed by the user, who split the
+  paragraph there or joined its lines. Across paragraphs, list items and
+  quotes the user split or joined, a break goes where a written break follows
+  its line or leads its next line, and an empty block next to the block it
+  followed or preceded, or at the same end of what its container became.
+  A break with an id or attributes and neither of its lines kept cannot be
+  placed, and nothing is written.
+- Last, a backstop that pairs nothing: every source node with an id or
+  attributes the writer would not give it must be written as it was, unless
+  its own Markdown is gone; an empty block unless neither block beside it
+  stands anywhere; a hard break unless no written break, other than a source
+  break of its own, stands beside its lines.
 - A mention, inline file or smart link is resolved by the line or the block
   that holds it before twins are judged, so two mentions of one person in
   different paragraphs never stand in each other's way.

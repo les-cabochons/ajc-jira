@@ -175,6 +175,23 @@ function earliestTwins(source: { content: unknown[] }, written: { content: unkno
   return checked ? { ok: true } : undefined;
 }
 
+/** Whether a document holds two blocks or atoms that differ at most in ids. */
+function hasTwins(value: { content: unknown[] }) {
+  const plain = (node: Node) =>
+    JSON.stringify(node, (key, each) => {
+      if (key === "localId" || key === "uniqueId") return undefined;
+      if (key === "attrs" && Object.keys(each as object).every((name) => name === "localId" || name === "uniqueId")) return undefined;
+      return each;
+    });
+  const nodes: Node[] = [];
+  const walk = (node: Node) => {
+    if (node.type !== "text" && node.type !== "hardBreak" && (Array.isArray(node.content) || node.type === "mention")) nodes.push(node);
+    (Array.isArray(node.content) ? (node.content as Node[]) : []).forEach(walk);
+  };
+  (value.content as Node[]).forEach(walk);
+  return new Set(nodes.map(plain)).size < nodes.length;
+}
+
 /** Every id a document holds, at every depth. */
 function everyId(value: { content?: unknown }) {
   const ids: string[] = [];
@@ -310,6 +327,199 @@ function editLine(markdown: string, pick: number) {
   return lines.join("\n");
 }
 
+/** A line's container prefix, a quote's or a list item's, and what follows it. */
+function lineParts(line: string) {
+  const quoted = /^(?:> ?)/.exec(line);
+  if (quoted) return { prefix: ">", body: line.slice(quoted[0].length) };
+  const indent = /^ +/.exec(line);
+  if (indent) return { prefix: " ", body: line.slice(indent[0].length) };
+  return { prefix: "", body: line };
+}
+
+/** Whether a line's body starts a block of its own, rather than going on with a paragraph. */
+function startsBlock(body: string) {
+  // A rule, or a line that would underline the paragraph above into a heading, too.
+  return /^(?:$|- |\d+\. |[*+] |#|\||```|~~~|>|<)|^(?:=+|-+|\*{3,}|_{3,})\s*$/.test(body);
+}
+
+/** The lines of a document's Markdown outside fences, by index. */
+function proseLines(lines: string[]) {
+  const prose = new Set<number>();
+  let fenced = false;
+  lines.forEach((line, index) => {
+    const body = lineParts(line).body.trimStart();
+    if (/^(?:```|~~~)/.test(body)) fenced = !fenced;
+    else if (!fenced) prose.add(index);
+  });
+  return prose;
+}
+
+/**
+ * Splits a paragraph between two of its lines: at the top, in a quote (into
+ * two paragraphs of one quote, or two quotes) or in a list item.
+ */
+function splitParagraph(markdown: string, pick: number) {
+  const lines = markdown.split("\n");
+  const prose = proseLines(lines);
+  const places = lines
+    .map((line, index) => ({ line, index }))
+    .filter(({ line, index }) => {
+      const next = lines[index + 1];
+      if (next === undefined || !prose.has(index) || !prose.has(index + 1)) return false;
+      const [here, there] = [lineParts(line), lineParts(next)];
+      if (here.prefix !== there.prefix || startsBlock(there.body)) return false;
+      // A list item's first line may hold its marker.
+      return here.body !== "" && (here.prefix === " " ? !/^(?:#|\||>)/.test(here.body) : !startsBlock(here.body));
+    });
+  if (places.length === 0) return markdown;
+  const { index, line } = places[Math.floor(pick * places.length)]!;
+  // In a quote, half the splits keep one quote.
+  const oneQuote = lineParts(line).prefix === ">" && (pick * places.length) % 1 < 0.5;
+  lines.splice(index + 1, 0, oneQuote ? ">" : "");
+  return lines.join("\n");
+}
+
+/**
+ * Joins two paragraphs into one, the second's first line after a hard break:
+ * at the top, in a quote, two quotes, or in a list item.
+ */
+function joinParagraphs(markdown: string, pick: number) {
+  const lines = markdown.split("\n");
+  const prose = proseLines(lines);
+  const places = lines
+    .map((line, index) => ({ line, index }))
+    .filter(({ line, index }) => {
+      const [before, after] = [lines[index - 1], lines[index + 1]];
+      if (before === undefined || after === undefined || !prose.has(index - 1) || !prose.has(index + 1)) return false;
+      if (line !== "" && line !== ">") return false;
+      const [here, there] = [lineParts(before), lineParts(after)];
+      if (here.body === "" || startsBlock(there.body)) return false;
+      if (line === ">") return here.prefix === ">" && there.prefix === ">" && !startsBlock(here.body);
+      if (there.prefix === " ") return here.prefix === " " ? !/^(?:#|\||>)/.test(here.body) : /^(?:- |\d+\. )/.test(here.body);
+      return here.prefix === there.prefix && !startsBlock(here.body);
+    });
+  if (places.length === 0) return markdown;
+  lines.splice(places[Math.floor(pick * places.length)]!.index, 1);
+  return lines.join("\n");
+}
+
+/** Gives some paragraphs at the top, in quotes and in list items a line more, after a hard break. */
+function addLines(value: { content: Node[] }, next: () => number) {
+  let count = 0;
+  const walk = (nodes: Node[]) => {
+    for (const node of nodes) {
+      if (node.type === "paragraph" && Array.isArray(node.content) && next() < 0.6) {
+        node.content = [...node.content, { type: "hardBreak" }, { type: "text", text: `line ${(count += 1)}` }];
+      }
+      if (["blockquote", "bulletList", "orderedList", "listItem"].includes(String(node.type))) walk(node.content ?? []);
+    }
+  };
+  walk(value.content);
+}
+
+/** Puts empty blocks, with ids or without, inside quotes and list items. */
+function addInnerGaps(value: { content: Node[] }, next: () => number) {
+  let count = 0;
+  const walk = (node: Node): Node => {
+    const content = (node.content ?? []).map(walk);
+    if (["blockquote", "listItem"].includes(String(node.type)) && content.length > 0 && next() < 0.5) {
+      const at = 1 + Math.floor(next() * content.length);
+      const empty = next() < 0.7 ? { type: "paragraph", attrs: { localId: `inner${(count += 1)}` } } : { type: "paragraph" };
+      content.splice(at, 0, empty);
+    }
+    return Array.isArray(node.content) ? { ...node, content } : node;
+  };
+  return { ...value, content: value.content.map(walk) };
+}
+
+type Edit = (parts: string[], at: number, pick: number) => string[];
+
+/**
+ * Writes an edit of generated descriptions, every node with its id and the
+ * attributes Markdown has no place for, and checks the write: it reads back
+ * as the edit, and the independent guard, its backstop included, accepts it.
+ */
+function runProbe(seeds: number, edits: Edit[], options: { splits?: boolean } = {}) {
+  const failures: unknown[] = [];
+  let refused = 0;
+  let twinCases = 0;
+  let checked = 0;
+  let edited = 0;
+  const guardRefused: number[] = [];
+  // Of those, the ones whose source holds no blocks or atoms that differ at most in ids.
+  const untwinnedRefused: number[] = [];
+  for (let seed = 1; seed <= seeds && failures.length < 4; seed += 1) {
+    const next = random(seed);
+    // Most nodes have their own id, and mentions, cells and tables the
+    // attributes Markdown has no place for, so keeping a node means keeping
+    // that very node.
+    // Some descriptions hold a block twice, as code-block twins.
+    const generated = generate(next);
+    if (next() < 0.3) {
+      const at = Math.floor(next() * generated.content.length);
+      generated.content.splice(at + 1, 0, generated.content[at]!);
+    }
+    // Paragraphs of several lines, for splits and joins.
+    if (options.splits) addLines(generated, next);
+    let value = decorate(generated, next);
+    if (options.splits) value = addInnerGaps(value, next);
+    // Empty lines between blocks, half of them with an id, as Jira's newer editor writes them.
+    let gapCount = 0;
+    const emptyLine = () => (next() < 0.5 ? { type: "paragraph", attrs: { localId: `gap${(gapCount += 1)}` } } : { type: "paragraph" });
+    const source = { ...value, content: value.content.flatMap((node) => (next() < 0.3 ? [emptyLine(), node] : [node])) };
+    if (describeJiraDescription(source, context).lost?.includes(NOT_WRITABLE_EXACTLY)) continue;
+    const read = adfToMarkdownParts(source, context)!;
+    const at = Math.floor(next() * read.parts.length);
+    const edit = edits[Math.floor(next() * edits.length)]!;
+    const original = read.parts.map((part) => part.markdown).join("\n\n");
+    const markdown = edit(read.parts.map((part) => part.markdown), at, next()).join("\n\n");
+    if (markdown !== original) edited += 1;
+    let written;
+    try {
+      written = patchDescriptionAdf(source, markdown, context);
+    } catch (error) {
+      // An ambiguous edit is refused, never guessed.
+      expect(String(error)).toMatch(/cannot tell which you kept|cannot tell where a line break|too large/);
+      refused += 1;
+      continue;
+    }
+    checked += 1;
+    const expected = adfToMarkdown(markdownToAdf(markdown), context) ?? "";
+    if ((adfToMarkdown(written, context) ?? "") !== expected) {
+      failures.push({ seed, kind: "reads", markdown, expected, written: adfToMarkdown(written, context) });
+    }
+    // The independent guard, at every depth: every node whose Markdown the
+    // edit kept is in the write as its very source ADF, ids and attributes
+    // included; changed nodes carry only what a gone source node had; no
+    // written node shares an id with another; and, pairing nothing, every
+    // source node that carries an id or attributes is accounted for.
+    // A patch result the guard rejects is a save refused, never a silent
+    // change: the write runs the guard. Such disagreements must stay rare.
+    let report;
+    try {
+      report = checkPreservation(source, written, context);
+    } catch {
+      guardRefused.push(seed);
+      if (!hasTwins(source)) untwinnedRefused.push(seed);
+      continue;
+    }
+    if (report.rebuilt.length > 0 || report.invalid.length > 0) {
+      guardRefused.push(seed);
+      if (!hasTwins(source)) untwinnedRefused.push(seed);
+      continue;
+    }
+    // What the guard passes: no id twice, and kept twins real source twins.
+    const ids = everyId(written);
+    if (new Set(ids).size !== ids.length) failures.push({ seed, kind: "shared id", markdown, ids });
+    const twinOrder = earliestTwins(source, written);
+    if (twinOrder) {
+      twinCases += 1;
+      if (!twinOrder.ok) failures.push({ seed, kind: "twin order", markdown, ...twinOrder });
+    }
+  }
+  return { failures, refused, checked, edited, guardRefused, untwinnedRefused, twinCases };
+}
+
 describe("generated descriptions", () => {
   it("never change silently: a description that names no loss writes back as the same ADF", () => {
     const failures: unknown[] = [];
@@ -368,8 +578,7 @@ describe("generated descriptions", () => {
   }, 60_000);
 
   it("read back as the edit, whatever the edit, when the description writes back as itself", () => {
-    const failures: unknown[] = [];
-    const edits = [
+    const edits: Edit[] = [
       (parts: string[], at: number) => parts.filter((_, index) => index !== at),
       (parts: string[], at: number) => [...parts.slice(0, at), "New *line*", ...parts.slice(at)],
       (parts: string[], at: number) => parts.map((part, index) => (index === at ? `${part}\nmore` : part)),
@@ -403,77 +612,32 @@ describe("generated descriptions", () => {
       (parts: string[], at: number, pick: number) => parts.map((part, index) => (index === at ? rewriteLines(part, pick) : part)),
       (parts: string[], at: number, pick: number) => parts.map((part, index) => (index === at ? rewriteLines(part, pick) : part)),
     ];
-    let refused = 0;
-    let twinCases = 0;
-    const guardRefused: number[] = [];
-    let checked = 0;
-    for (let seed = 1; seed <= 4000 && failures.length < 4; seed += 1) {
-      const next = random(seed);
-      // Most nodes have their own id, and mentions, cells and tables the
-      // attributes Markdown has no place for, so keeping a node means keeping
-      // that very node.
-      // Some descriptions hold a block twice, as code-block twins.
-      const generated = generate(next);
-      if (next() < 0.3) {
-        const at = Math.floor(next() * generated.content.length);
-        generated.content.splice(at + 1, 0, generated.content[at]!);
-      }
-      const value = decorate(generated, next);
-      // Empty lines between blocks, half of them with an id, as Jira's newer editor writes them.
-      let gapCount = 0;
-      const emptyLine = () => (next() < 0.5 ? { type: "paragraph", attrs: { localId: `gap${(gapCount += 1)}` } } : { type: "paragraph" });
-      const source = { ...value, content: value.content.flatMap((node) => (next() < 0.3 ? [emptyLine(), node] : [node])) };
-      if (describeJiraDescription(source, context).lost?.includes(NOT_WRITABLE_EXACTLY)) continue;
-      const read = adfToMarkdownParts(source, context)!;
-      const at = Math.floor(next() * read.parts.length);
-      const edit = edits[Math.floor(next() * edits.length)]!;
-      const markdown = edit(read.parts.map((part) => part.markdown), at, next()).join("\n\n");
-      let written;
-      try {
-        written = patchDescriptionAdf(source, markdown, context);
-      } catch (error) {
-        // An ambiguous edit is refused, never guessed.
-        expect(String(error)).toMatch(/cannot tell which you kept|cannot tell where a line break|too large/);
-        refused += 1;
-        continue;
-      }
-      checked += 1;
-      const expected = adfToMarkdown(markdownToAdf(markdown), context) ?? "";
-      if ((adfToMarkdown(written, context) ?? "") !== expected) {
-        failures.push({ seed, kind: "reads", markdown, expected, written: adfToMarkdown(written, context) });
-      }
-      // The independent guard, at every depth: every node whose Markdown the
-      // edit kept is in the write as its very source ADF, ids and attributes
-      // included; changed nodes carry only what a gone source node had; no
-      // written node shares an id with another.
-      // A patch result the guard rejects is a save refused, never a silent
-      // change: the write runs the guard. Such disagreements must stay rare.
-      let report;
-      try {
-        report = checkPreservation(source, written, context);
-      } catch {
-        guardRefused.push(seed);
-        continue;
-      }
-      if (report.rebuilt.length > 0 || report.invalid.length > 0) {
-        guardRefused.push(seed);
-        continue;
-      }
-      // What the guard passes: no id twice, and kept twins real source twins.
-      const ids = everyId(written);
-      if (new Set(ids).size !== ids.length) failures.push({ seed, kind: "shared id", markdown, ids });
-      const twinOrder = earliestTwins(source, written);
-      if (twinOrder) {
-        twinCases += 1;
-        if (!twinOrder.ok) failures.push({ seed, kind: "twin order", markdown, ...twinOrder });
-      }
-    }
+    const { failures, refused, checked, guardRefused, untwinnedRefused, twinCases } = runProbe(4000, edits);
     expect(failures).toEqual([]);
     expect(checked).toBeGreaterThan(1000);
     expect(refused).toBeLessThan(checked / 5);
+    expect(untwinnedRefused).toEqual([]);
     expect(guardRefused.length).toBeLessThan(checked / 500);
     // Deleting or editing among twins that differ only in ids happens often enough to mean something.
     expect(twinCases).toBeGreaterThan(10);
+  }, 60_000);
+
+  it("keep every hard break and empty block a paragraph split or join leaves next to a kept line", () => {
+    // Splits and joins of paragraphs at the top, in quotes and in list items,
+    // whose hard breaks and empty blocks carry ids and attributes.
+    const edits: Edit[] = [
+      (parts, _at, pick) => [splitParagraph(parts.join("\n\n"), pick)],
+      (parts, _at, pick) => [joinParagraphs(parts.join("\n\n"), pick)],
+      (parts, _at, pick) => [joinParagraphs(splitParagraph(parts.join("\n\n"), pick), 1 - pick)],
+    ];
+    const { failures, refused, checked, edited, guardRefused, untwinnedRefused } = runProbe(4000, edits, { splits: true });
+    // The backstop runs in the guard on every write the patch makes.
+    expect(failures).toEqual([]);
+    expect(edited).toBeGreaterThan(1000);
+    expect(refused).toBeLessThan(checked / 10);
+    // The guard refuses only where twins leave which is which open.
+    expect(untwinnedRefused).toEqual([]);
+    expect(guardRefused.length).toBeLessThan(checked / 50);
   }, 60_000);
 
   it("the independent guard names a kept node written otherwise, and ids a changed node could not have", () => {
@@ -538,6 +702,50 @@ describe("generated descriptions", () => {
     };
 
     expect(checkPreservation(source, written, context)).toEqual({ rebuilt: [], invalid: [] });
+  });
+
+  it("the backstop catches a hard break rebuilt when its paragraph was split, whatever the pairing", () => {
+    // As the patch wrote it before round 6: the first break plain, in a paragraph of its own.
+    const first = { type: "hardBreak", attrs: { localId: "break-1", text: "\n" } };
+    const t = (value: string) => ({ type: "text", text: value });
+    const source = { type: "doc", version: 1, content: [{ type: "paragraph", content: [t("a"), first, t("b"), { type: "hardBreak" }, t("c")] }] };
+    const written = { content: [{ type: "paragraph", content: [t("a"), { type: "hardBreak" }, t("b")] }, { type: "paragraph", content: [t("c")] }] };
+
+    expect(checkPreservation(source, written, context).rebuilt).toContain(first);
+    expect(checkPreservation(source, patchDescriptionAdf(source, "a\nb\n\nc", context), context)).toEqual({ rebuilt: [], invalid: [] });
+  });
+
+  it("the backstop frees a node whose neighbours, or whose own Markdown, the user changed", () => {
+    const t = (value: string) => ({ type: "text", text: value });
+    const lineBreak = { type: "hardBreak", attrs: { localId: "break-1", text: "\n" } };
+    const empty = { type: "paragraph", attrs: { localId: "gap" } };
+    const note = { type: "paragraph", attrs: { localId: "p" }, content: [t("Note")] };
+    const source = {
+      type: "doc",
+      version: 1,
+      content: [{ type: "paragraph", content: [t("a"), lineBreak, t("b")] }, empty, note],
+    };
+
+    // The paragraph with the break and the empty line deleted: their lines and neighbours are gone.
+    expect(checkPreservation({ ...source, content: [source.content[0], note] }, { content: [note] }, context)).toEqual({
+      rebuilt: [],
+      invalid: [],
+    });
+    // The paragraph split at the break: no written break stands beside its lines.
+    expect(
+      checkPreservation(source, { content: [{ type: "paragraph", content: [t("a")] }, { type: "paragraph", content: [t("b")] }, empty, note] }, context),
+    ).toEqual({ rebuilt: [], invalid: [] });
+    // A plain break beside its line, where no plain source break stood, was written for it.
+    expect(
+      checkPreservation(source, { content: [{ type: "paragraph", content: [t("a"), { type: "hardBreak" }, t("B")] }, empty, note] }, context).rebuilt,
+    ).toContain(lineBreak);
+    // The note kept as it reads, but without its id, is not accounted for.
+    const rebuiltNote = { type: "paragraph", content: [t("Note")] };
+    expect(checkPreservation(source, { content: [rebuiltNote] }, context).rebuilt).toContain(note);
+    // The empty line next to a block that stayed must stay too.
+    expect(
+      checkPreservation(source, { content: [{ type: "paragraph", content: [t("a"), lineBreak, t("b")] }, note] }, context).rebuilt,
+    ).toContain(empty);
   });
 
   it("the conservation check names a uniqueId written twice", () => {

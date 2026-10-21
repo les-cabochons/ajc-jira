@@ -247,8 +247,9 @@ function pairItems(sources: AdfNode[], written: AdfNode[], context: AdfImageCont
  * own, as empty paragraphs, by their boundaries. At the start or the end of
  * the block, the start or the end; else right after the kept child before
  * them, else right before the kept child after them; the rest in order when
- * as many are left on each side. A source one left over that carries an id
- * or attributes cannot be placed, and nothing is written.
+ * as many are left on each side. A source one left over goes to
+ * `placeBoundaryNodes`, by the blocks it stood between, wherever they now
+ * stand; the write's check refuses what neither places.
  */
 function pairChildren(sources: AdfNode[], written: AdfNode[], context: AdfImageContext): Pair[] {
   const split = (nodes: AdfNode[]) => {
@@ -309,8 +310,6 @@ function pairChildren(sources: AdfNode[], written: AdfNode[], context: AdfImageC
   leftWritten.push(...writtenSide.gaps.flatMap((gap, index) => (claimed.has(index) ? [] : gap)));
   if (leftSource.length === leftWritten.length) {
     leftSource.forEach((node, at) => pairs.push({ source: node, written: leftWritten[at]!, same: true }));
-  } else if (leftSource.some(carriesMore)) {
-    throw new Error(UNPLACED_EDIT);
   }
   return pairs;
 }
@@ -507,9 +506,11 @@ function carriesMore(node: AdfNode) {
  * Lines are lined up by their Markdown. A source break stays as the break
  * after its line, or before the next one, when that line is kept and still
  * has a break on that side; the breaks left pair in order when as many are
- * left on each side, and otherwise a source break that carries an id or
- * attributes cannot be placed, and nothing is written. The atoms of a kept
- * line are that line's, in order.
+ * left on each side. Otherwise a source break beside a kept line that has no
+ * break left on its side was removed, as when the user splits the paragraph
+ * there; one that carries an id or attributes with neither of its lines kept
+ * cannot be placed, and nothing is written. The atoms of a kept line are
+ * that line's, in order.
  */
 function pairLines(sources: AdfNode[], written: AdfNode[], context: AdfImageContext): Pair[] {
   const sourceSide = linesOf(sources);
@@ -519,12 +520,16 @@ function pairLines(sources: AdfNode[], written: AdfNode[], context: AdfImageCont
   const pairs: Pair[] = [];
   const claimed = new Set<number>();
   const leftSource: AdfNode[] = [];
+  // Breaks beside a kept line that has no break left on their side: the
+  // user split the paragraph there, or joined the lines.
+  const removed = new Set<AdfNode>();
   sourceSide.breaks.forEach((node, index) => {
     let target = -1;
     if (match[index]! >= 0 && match[index]! < writtenSide.breaks.length) target = match[index]!;
     else if (match[index + 1]! > 0) target = match[index + 1]! - 1;
     if (target === -1 || claimed.has(target)) {
       leftSource.push(node);
+      if (match[index]! >= 0 || match[index + 1]! >= 0) removed.add(node);
       return;
     }
     claimed.add(target);
@@ -533,7 +538,8 @@ function pairLines(sources: AdfNode[], written: AdfNode[], context: AdfImageCont
   const leftWritten = writtenSide.breaks.filter((_, index) => !claimed.has(index));
   if (leftSource.length === leftWritten.length) {
     leftSource.forEach((node, at) => pairs.push({ source: node, written: leftWritten[at]!, same: true }));
-  } else if (leftSource.some(carriesMore)) {
+  } else if (leftSource.some((node) => carriesMore(node) && !removed.has(node))) {
+    // Neither of its lines kept: where it went cannot be told.
     throw new Error(UNPLACED_EDIT);
   }
   const atoms = (nodes: AdfNode[]) => nodes.filter((node) => node.type !== "text");
@@ -703,6 +709,179 @@ export function restoreKeptNodes(source: AdfNode[], written: AdfNode[], context:
     return content.every((child, at) => child === slot.children[at]!.node) ? node : { ...node, content };
   };
   return writtenSlots.map(build);
+}
+
+/**
+ * The last pass for nodes with no Markdown of their own that carry an id or
+ * attributes, across blocks the user split, joined, moved or changed in kind:
+ * a source hard break not yet written goes where a written break follows the
+ * same line, or else precedes the same next line; a source empty block not yet
+ * written goes right after the block it followed, or else right before the
+ * block it preceded, wherever that block now stands, or, when the user
+ * changed that block, at the same end of what its container became. Breaks
+ * between the same two lines, as many written as read, as when the user joins
+ * paragraphs that read the same, go in document order. Lines written as they
+ * were read are left alone. Only where that place is one alone; otherwise the
+ * write's check decides.
+ */
+export function placeBoundaryNodes(source: AdfNode[], written: AdfNode[], context: AdfImageContext): AdfNode[] {
+  const line = (nodes: AdfNode[]) => runMarkdown(nodes, true, context);
+  const blockKey = (node: AdfNode) => `${String(node.type)}\u0000${keyOf(node, context)}`;
+  const writtenJson = new Map<string, number>();
+  const count = (node: AdfNode) => writtenJson.set(JSON.stringify(node), (writtenJson.get(JSON.stringify(node)) ?? 0) + 1);
+  written.flatMap(subtree).forEach(count);
+
+  // Lines written as they were read, breaks and all, are left as they are.
+  const keptLines = new Map<string, number>();
+  const lineContainers = (nodes: AdfNode[]) => nodes.flatMap(subtree).filter((node) => INLINE_CONTAINERS.has(String(node.type)));
+  const sourceLines = new Set(lineContainers(source).map((node) => JSON.stringify(node)));
+  const countKept = () => {
+    keptLines.clear();
+    for (const node of lineContainers(written)) {
+      const json = JSON.stringify(node);
+      if (sourceLines.has(json)) keptLines.set(json, (keptLines.get(json) ?? 0) + 1);
+    }
+  };
+  const kept = (node: AdfNode) => {
+    const json = JSON.stringify(node);
+    if (!INLINE_CONTAINERS.has(String(node.type)) || (keptLines.get(json) ?? 0) === 0) return false;
+    keptLines.set(json, keptLines.get(json)! - 1);
+    return true;
+  };
+  countKept();
+
+  // The source's boundary nodes not yet written, with their neighbours, and
+  // the plain breaks of the lines not kept as they were.
+  type Break = { node: AdfNode; before: string; after: string; pending: boolean };
+  type Empty = { node: AdfNode; before?: string; after?: string; parent?: AdfNode };
+  const breaks: Break[] = [];
+  const empties: Empty[] = [];
+  const collect = (siblings: AdfNode[], inline: boolean, parent?: AdfNode) => {
+    const { lines } = linesOf(siblings);
+    let breakAt = 0;
+    const keys = siblings.map((node) => (node.type === "text" ? "" : keyOf(node, context)));
+    siblings.forEach((node, index) => {
+      if (node.type === "text") return;
+      const at = node.type === "hardBreak" ? breakAt++ : -1;
+      if (!kept(node)) collect(childrenOf(node), INLINE_CONTAINERS.has(String(node.type)), node);
+      if (keys[index] !== "") return;
+      if (!carriesMore(node)) {
+        if (inline && node.type === "hardBreak") breaks.push({ node, before: line(lines[at]!), after: line(lines[at + 1]!), pending: false });
+        return;
+      }
+      const json = JSON.stringify(node);
+      if ((writtenJson.get(json) ?? 0) > 0) {
+        writtenJson.set(json, writtenJson.get(json)! - 1);
+        return;
+      }
+      if (inline && node.type === "hardBreak") {
+        breaks.push({ node, before: line(lines[at]!), after: line(lines[at + 1]!), pending: true });
+      } else if (!inline) {
+        const before = siblings.slice(0, index).filter((_, i) => keys[i] !== "").at(-1);
+        const after = siblings.slice(index + 1).find((_, i) => keys[index + 1 + i] !== "");
+        empties.push({ node, before: before && blockKey(before), after: after && blockKey(after), parent });
+      }
+    });
+  };
+  collect(source, false);
+  if (!breaks.some((each) => each.pending) && empties.length === 0) return written;
+  countKept();
+
+  // The written breaks that are plain, with their lines; and every written block, by place.
+  type Slot = { place: string; index: number; before: string; after: string };
+  const slots: Slot[] = [];
+  const blocks: { place: string; parent: string; index: number; key: string; node: AdfNode }[] = [];
+  const survey = (nodes: AdfNode[], place: string) => {
+    nodes.forEach((node, at) => {
+      const here = `${place}/${at}`;
+      if (INLINE_CONTAINERS.has(String(node.type))) {
+        const { lines, breaks: written } = linesOf(childrenOf(node));
+        if (!kept(node)) {
+          written.forEach((each, breakAt) => {
+            if (!carriesMore(each)) slots.push({ place: here, index: breakAt, before: line(lines[breakAt]!), after: line(lines[breakAt + 1]!) });
+          });
+        }
+      } else if (node.type !== "text") {
+        survey(childrenOf(node), here);
+      }
+      if (node.type !== "text" && keyOf(node, context) !== "") blocks.push({ place: here, parent: place, index: at, key: blockKey(node), node });
+    });
+  };
+  survey(written, "");
+
+  const breakAt = new Map<string, AdfNode>();
+  // Breaks between the same two lines, as many written as read, as when two
+  // paragraphs that read the same are joined: in document order.
+  const pairOf = (each: { before: string; after: string }) => `${each.before}\u0000${each.after}`;
+  const placed = new Set<Break>();
+  for (const pair of new Set(breaks.filter((each) => each.pending).map(pairOf))) {
+    const read = breaks.filter((each) => pairOf(each) === pair);
+    const places = slots.filter((slot) => pairOf(slot) === pair);
+    if (read.length < 2 || read.length !== places.length || (read[0]!.before === "" && read[0]!.after === "")) continue;
+    read.forEach((each, at) => {
+      if (each.pending) breakAt.set(`${places[at]!.place}#${places[at]!.index}`, each.node);
+      placed.add(each);
+    });
+  }
+  for (const each of breaks.filter((each) => each.pending && !placed.has(each))) {
+    const free = (candidates: Slot[]) => candidates.filter((slot) => !breakAt.has(`${slot.place}#${slot.index}`));
+    const after = each.before !== "" ? free(slots.filter((slot) => slot.before === each.before)) : [];
+    const before = each.after !== "" ? free(slots.filter((slot) => slot.after === each.after)) : [];
+    const target = after.length === 1 ? after[0] : after.length === 0 && before.length === 1 ? before[0] : undefined;
+    if (target) breakAt.set(`${target.place}#${target.index}`, each.node);
+  }
+  const insertAfter = new Map<string, AdfNode[]>();
+  const insertBefore = new Map<string, AdfNode[]>();
+  const prepend = new Map<string, AdfNode[]>();
+  const append = new Map<string, AdfNode[]>();
+  const add = (map: Map<string, AdfNode[]>, place: string, node: AdfNode) => map.set(place, [...(map.get(place) ?? []), node]);
+  // The written block a source container became: the one with its id, or
+  // the only one of its kind the write changed.
+  const sourceJson = new Set(source.flatMap(subtree).map((node) => JSON.stringify(node)));
+  const counterpart = (parent: AdfNode) => {
+    const same = blocks.filter((block) => block.node.type === parent.type);
+    const id = parent.attrs?.localId;
+    if (id !== undefined) {
+      const byId = same.filter((block) => block.node.attrs?.localId === id);
+      return byId.length === 1 ? byId[0] : undefined;
+    }
+    const changed = same.filter((block) => !sourceJson.has(JSON.stringify(block.node)));
+    return changed.length === 1 ? changed[0] : undefined;
+  };
+  for (const each of empties) {
+    const after = each.before ? blocks.filter((block) => block.key === each.before) : [];
+    const before = each.after ? blocks.filter((block) => block.key === each.after) : [];
+    if (after.length === 1) add(insertAfter, after[0]!.place, each.node);
+    else if (after.length === 0 && before.length === 1) add(insertBefore, before[0]!.place, each.node);
+    else if (after.length === 0 && before.length === 0 && each.parent && (!each.before || !each.after)) {
+      // At the start or the end of a container whose block beside it the
+      // user changed: at the same end of what that container became.
+      const target = counterpart(each.parent);
+      if (target) add(each.before ? append : prepend, target.place, each.node);
+    }
+  }
+  if (breakAt.size === 0 && insertAfter.size === 0 && insertBefore.size === 0 && prepend.size === 0 && append.size === 0) return written;
+
+  const rebuild = (nodes: AdfNode[], place: string): AdfNode[] =>
+    nodes.flatMap((node, at) => {
+      const here = `${place}/${at}`;
+      let next = node;
+      if (INLINE_CONTAINERS.has(String(node.type))) {
+        let breakIndex = 0;
+        const content = childrenOf(node).map((child) => {
+          if (child.type !== "hardBreak") return child;
+          return breakAt.get(`${here}#${breakIndex++}`) ?? child;
+        });
+        if (content.some((child, i) => child !== childrenOf(node)[i])) next = { ...node, content };
+      } else if (node.type !== "text" && childrenOf(node).length > 0) {
+        const content = [...(prepend.get(here) ?? []), ...rebuild(childrenOf(node), here), ...(append.get(here) ?? [])];
+        if (content.length !== childrenOf(node).length || content.some((child, i) => child !== childrenOf(node)[i])) {
+          next = { ...node, content };
+        }
+      }
+      return [...(insertBefore.get(here) ?? []), next, ...(insertAfter.get(here) ?? [])];
+    });
+  return rebuild(written, "");
 }
 
 /**

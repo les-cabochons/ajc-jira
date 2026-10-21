@@ -12,9 +12,11 @@ import { AMBIGUOUS_EDIT, documentOf } from "./description-nested.js";
 // lines on each side, an empty block by the blocks on each side. One whose
 // line or block on either side is kept, and still has such a node on that
 // side, is that node; the rest pair in order when as many are left on each
-// side; a source one left over that carries an id or attributes is lost. A
-// mention, inline file or smart link is resolved by the line or the block
-// that holds it.
+// side; a source one left over that carries an id or attributes is lost.
+// But a hard break left over, and an empty block between two blocks neither
+// of which is kept, as when the user splits or joins there, are left to the
+// backstop. A mention, inline file or smart link is resolved
+// by the line or the block that holds it.
 //
 // Then by conservation, for what context left unresolved, as nodes moved to
 // another place or kind. Each node is keyed by its kind and its own Markdown,
@@ -25,6 +27,10 @@ import { AMBIGUOUS_EDIT, documentOf } from "./description-nested.js";
 // no longer held was changed or deleted by the user. A changed node may carry
 // ids and attributes only from a source node of its kind that did not
 // survive, and no id is written twice.
+//
+// Last, the backstop, which pairs nothing at all: every source node that
+// carries an id or attributes the writer would not give it must be
+// accounted for, wherever splits, joins, moves and kind changes put it.
 
 /** Attributes the writer never gives a node of each kind, which a changed node can only have from its source. */
 const CARRIED_ATTRIBUTES: Record<string, string[]> = {
@@ -213,6 +219,9 @@ export function checkPreservation(
     const claimed = new Set<number>();
     const leftSource: AdfNode[] = [];
     const leftWritten: AdfNode[] = [];
+    // Gaps between two blocks neither of which is kept, as when the user joins
+    // them: if they are not paired in order, the backstop tells them.
+    const placeless = new Set<AdfNode>();
     const last = sourceGaps.length - 1;
     const order = [0, ...(last > 0 ? [last] : []), ...sourceGaps.map((_, index) => index).slice(1, last)];
     for (const index of order) {
@@ -235,6 +244,7 @@ export function checkPreservation(
       }
       if (target === -1 || claimed.has(target)) {
         leftSource.push(...gap);
+        if (target === -1 && match[index - 1]! < 0 && match[index]! < 0) gap.forEach((node) => placeless.add(node));
         continue;
       }
       claimed.add(target);
@@ -247,7 +257,7 @@ export function checkPreservation(
     if (leftSource.length === leftWritten.length) {
       leftSource.forEach((node, at) => keep(node, leftWritten[at]!));
     } else {
-      leftSource.forEach(leftOver);
+      leftSource.forEach((node) => (placeless.has(node) ? resolvedSources.add(node) : leftOver(node)));
       leftWritten.forEach((node) => resolvedWritten.add(node));
     }
   };
@@ -348,7 +358,9 @@ export function checkPreservation(
     if (leftSource.length === leftWritten.length) {
       leftSource.forEach((node, at) => keep(node, leftWritten[at]!));
     } else {
-      leftSource.forEach(leftOver);
+      // Breaks left without a place here, as when the user split the
+      // paragraph at them: the backstop tells whether one was rebuilt.
+      leftSource.forEach((node) => resolvedSources.add(node));
       leftWritten.forEach((node) => resolvedWritten.add(node));
     }
 
@@ -510,5 +522,157 @@ export function checkPreservation(
       invalid.push(...writtenNodes.filter((node) => identitiesOf(node).includes(id)));
     }
   }
+  rebuilt.push(...unaccountedFor(source.content as AdfNode[], written.content as AdfNode[], context));
   return { rebuilt: [...new Set(rebuilt)], invalid: [...new Set(invalid)] };
+}
+
+/** The attributes the writer gives each kind of node by itself. */
+const WRITER_ATTRIBUTES: Record<string, string[]> = {
+  heading: ["level"],
+  orderedList: ["order"],
+  codeBlock: ["language"],
+  table: ["isNumberColumnEnabled", "layout"],
+  taskItem: ["state"],
+  mediaSingle: ["layout", "width", "widthType"],
+  media: ["type", "id", "collection", "alt", "width", "height", "occurrenceKey", "url"],
+  mediaInline: ["type", "id", "collection", "alt", "width", "height", "occurrenceKey"],
+  mention: ["id", "text"],
+  inlineCard: ["url"],
+};
+
+/** Whether a node carries what the writer would not give it by itself: an id, or another attribute. */
+function carries(node: AdfNode) {
+  const own = WRITER_ATTRIBUTES[String(node.type)] ?? [];
+  return Object.entries(node.attrs ?? {}).some(
+    ([name, value]) => !own.includes(name) && !(node.type === "hardBreak" && name === "text" && value === "\n"),
+  );
+}
+
+/**
+ * The backstop, which pairs nothing: every source node that carries what the
+ * writer would not give it by itself must be accounted for. It is, when the
+ * written document holds a node deep-equal to it; or, for a node with
+ * Markdown of its own, when that Markdown no longer stands anywhere, or when
+ * it was one of twins that differ only in ids and fewer are written. An empty
+ * block is, when neither the block before it nor the block after it stands
+ * anywhere in the written document. A hard break is, when no written break
+ * follows its line before or leads its line after, other than a source break
+ * of its own: the user split the paragraph at it, or joined its lines, or
+ * changed them both. Splits, joins, moves and kind changes cannot slip past it.
+ */
+function unaccountedFor(source: AdfNode[], written: AdfNode[], context: AdfImageContext): AdfNode[] {
+  const markdownOf = (node: AdfNode) => (node.type === "text" ? "" : (adfToMarkdown(documentOf(node), context) ?? ""));
+  const keyOf = (node: AdfNode) => `${String(node.type)}\u0000${markdownOf(node)}`;
+  const lineOf = (nodes: AdfNode[]) =>
+    adfToMarkdown({ type: "doc", version: 1, content: [{ type: "paragraph", content: nodes }] }, context) ?? "";
+
+  // What stands anywhere in the written document: its nodes, and its lines.
+  const writtenNodes = everyNode(written).filter((node) => node.type !== "text");
+  const writtenJson = new Map<string, number>();
+  for (const node of writtenNodes) writtenJson.set(JSON.stringify(node), (writtenJson.get(JSON.stringify(node)) ?? 0) + 1);
+  const tally = (values: string[]) => {
+    const counts = new Map<string, number>();
+    for (const value of values) counts.set(value, (counts.get(value) ?? 0) + 1);
+    return counts;
+  };
+  const lines = (nodes: AdfNode[]) => {
+    const result: AdfNode[][] = [[]];
+    for (const node of nodes) {
+      if (node.type === "hardBreak") result.push([]);
+      else result[result.length - 1]!.push(node);
+    }
+    return result;
+  };
+  const keysIn = (nodes: AdfNode[]) => nodes.filter((node) => markdownOf(node) !== "").map(keyOf);
+  // A neighbouring block survives when the written document holds it at
+  // least as many times as the source did: one of two equal blocks, the
+  // other deleted, may be the deleted one.
+  const sourceNodes = everyNode(source).filter((node) => node.type !== "text");
+  const sourceKeyCounts = tally(keysIn(sourceNodes));
+  const writtenKeys = tally(keysIn(writtenNodes));
+  const blockSurvives = (node: AdfNode | undefined) =>
+    node !== undefined && (writtenKeys.get(keyOf(node)) ?? 0) >= (sourceKeyCounts.get(keyOf(node)) ?? 0);
+  // Every hard break, with its JSON and the lines on either side of it.
+  const breaksIn = (nodes: AdfNode[]) =>
+    nodes
+      .filter((node) => INLINE_CONTAINERS.has(String(node.type)))
+      .flatMap((node) => {
+        const runLines = lines(childrenOf(node)).map(lineOf);
+        return childrenOf(node)
+          .filter((child) => child.type === "hardBreak")
+          .map((child, at) => ({ json: JSON.stringify(child), carries: carries(child), before: runLines[at]!, after: runLines[at + 1]! }));
+      });
+  const writtenBreaks = breaksIn(writtenNodes);
+  const sourceBreaks = breaksIn(sourceNodes);
+  // A written break is a source break when it is one with an id or attributes
+  // of its own, wherever it stands, or a plain one beside the same line.
+  const explained = (written: { json: string; before: string; after: string }) =>
+    sourceBreaks.some(
+      (each) =>
+        each.json === written.json &&
+        (each.carries || (each.before !== "" && each.before === written.before) || (each.after !== "" && each.after === written.after)),
+    );
+  const unaccounted: AdfNode[] = [];
+
+  // Nodes with Markdown of their own, key by key. A written node equal to no
+  // source node with its key was rebuilt from one of them; as many source
+  // nodes that carry something and are written nowhere as they were are not
+  // accounted for. With none rebuilt, those not written were deleted.
+  const byKey = (nodes: AdfNode[]) => {
+    const map = new Map<string, AdfNode[]>();
+    for (const node of nodes) {
+      if (node.type !== "text" && markdownOf(node) !== "") map.set(keyOf(node), [...(map.get(keyOf(node)) ?? []), node]);
+    }
+    return map;
+  };
+  const writtenByKey = byKey(writtenNodes);
+  for (const [key, sourceNodes] of byKey(everyNode(source))) {
+    const left = (writtenByKey.get(key) ?? []).map((node) => JSON.stringify(node));
+    const unmatched: AdfNode[] = [];
+    for (const node of sourceNodes) {
+      const at = left.indexOf(JSON.stringify(node));
+      if (at === -1) unmatched.push(node);
+      else left.splice(at, 1);
+    }
+    const rebuiltCount = left.filter((json) => !sourceNodes.some((node) => JSON.stringify(node) === json)).length;
+    unaccounted.push(...unmatched.filter(carries).slice(0, rebuiltCount));
+  }
+
+  const visit = (siblings: AdfNode[], inline: boolean) => {
+    const markdowns = siblings.map(markdownOf);
+    // The lines of a run of text, and which line each hard break follows.
+    const runLines = inline ? lines(siblings).map(lineOf) : [];
+    let breakIndex = 0;
+    siblings.forEach((node, index) => {
+      if (node.type === "text") return;
+      const thisBreak = node.type === "hardBreak" ? breakIndex++ : -1;
+      visit(childrenOf(node), INLINE_CONTAINERS.has(String(node.type)));
+      if (markdowns[index] !== "" || !carries(node)) return;
+      const json = JSON.stringify(node);
+      if ((writtenJson.get(json) ?? 0) > 0) {
+        writtenJson.set(json, writtenJson.get(json)! - 1);
+        return;
+      }
+      // No Markdown of its own: told by its neighbours, wherever they now stand.
+      let survives: boolean;
+      if (inline && node.type === "hardBreak") {
+        // A break stands where it was when a written break follows its line
+        // before or leads its line after. Such a break, unless it is a source
+        // break of its own there, was written for this one. A break with no
+        // written break beside its lines was removed: its paragraph split
+        // there, or its lines joined.
+        const [before, after] = [runLines[thisBreak]!, runLines[thisBreak + 1]!];
+        survives = writtenBreaks.some(
+          (each) => ((before !== "" && each.before === before) || (after !== "" && each.after === after)) && !explained(each),
+        );
+      } else {
+        const before = siblings.slice(0, index).filter((_, at) => markdowns[at] !== "").at(-1);
+        const after = siblings.slice(index + 1).find((_, at) => markdowns[index + 1 + at] !== "");
+        survives = blockSurvives(before) || blockSurvives(after);
+      }
+      if (survives) unaccounted.push(node);
+    });
+  };
+  visit(source, false);
+  return unaccounted;
 }
