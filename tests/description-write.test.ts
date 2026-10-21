@@ -207,6 +207,79 @@ describe("writeDescription", () => {
     expect(table.content[0]!.content[0]!.content).toEqual([paragraph(text("a|b", [{ type: "code" }]))]);
   });
 
+  it("keeps an untouched cell exactly, its mention's attributes included, when another cell changes", async () => {
+    const mentionCell = {
+      type: "tableHeader",
+      attrs: { localId: "c1", colspan: 1, rowspan: 1 },
+      content: [
+        {
+          type: "paragraph",
+          attrs: { localId: "p1" },
+          content: [{ type: "mention", attrs: { id: "557058:ana", text: "@Ana", accessLevel: "CONTAINER", userType: "DEFAULT", localId: "m1" } }],
+        },
+      ],
+    };
+    const changed = { type: "tableHeader", attrs: { localId: "c2", colspan: 1 }, content: [{ type: "paragraph", attrs: { localId: "p2" }, content: [text("x")] }] };
+    const table = {
+      type: "table",
+      attrs: { isNumberColumnEnabled: false, layout: "center", width: 760, localId: "t1" },
+      content: [{ type: "tableRow", attrs: { localId: "r1" }, content: [mentionCell, changed] }],
+    };
+    const puts = stubJira({ description: doc(table) });
+
+    await writeDescription(connection, {
+      sourceId: SOURCE_ID,
+      text: "| [@Ana](mention:557058:ana) | y |\n| --- | --- |",
+      expected: "| [@Ana](mention:557058:ana) | x |\n| --- | --- |",
+    });
+    expect(writtenDescription(puts)).toEqual(
+      doc({
+        ...table,
+        content: [
+          {
+            type: "tableRow",
+            attrs: { localId: "r1" },
+            content: [
+              mentionCell,
+              { type: "tableHeader", attrs: { localId: "c2", colspan: 1 }, content: [{ type: "paragraph", attrs: { localId: "p2" }, content: [text("y")] }] },
+            ],
+          },
+        ],
+      }),
+    );
+  });
+
+  it("keeps untouched sibling tasks exactly when one task changes, and the changed task's id", async () => {
+    const task = (localId: string, state: string, value: string) => ({ type: "taskItem", attrs: { localId, state }, content: [text(value)] });
+    const tasks = { type: "taskList", attrs: { localId: "l1" }, content: [task("t1", "DONE", "Plan"), task("t2", "TODO", "Build"), task("t3", "TODO", "Ship")] };
+    const puts = stubJira({ description: doc(tasks) });
+
+    await writeDescription(connection, {
+      sourceId: SOURCE_ID,
+      text: "- [x] Plan\n- [x] Build it\n- [ ] Ship",
+      expected: "- [x] Plan\n- [ ] Build\n- [ ] Ship",
+    });
+    expect(writtenDescription(puts)).toEqual(
+      doc({ ...tasks, content: [tasks.content[0], task("t2", "DONE", "Build it"), tasks.content[2]] }),
+    );
+  });
+
+  it("keeps a changed paragraph's mention attributes and the untouched items of its list", async () => {
+    const item = (localId: string, ...content: unknown[]) => ({ type: "listItem", attrs: { localId }, content: [{ type: "paragraph", content }] });
+    const mention = { type: "mention", attrs: { id: "557058:ana", text: "@Ana", accessLevel: "", userType: "DEFAULT" } };
+    const list = { type: "bulletList", attrs: { localId: "b1" }, content: [item("i1", text("Ask "), mention), item("i2", text("Two"))] };
+    const puts = stubJira({ description: doc(list) });
+
+    await writeDescription(connection, {
+      sourceId: SOURCE_ID,
+      text: "- Ask [@Ana](mention:557058:ana) today\n- Two",
+      expected: "- Ask [@Ana](mention:557058:ana)\n- Two",
+    });
+    expect(writtenDescription(puts)).toEqual(
+      doc({ ...list, content: [item("i1", text("Ask "), mention, text(" today")), list.content[1]] }),
+    );
+  });
+
   it("writes nothing over a table whose code holds a backslash before a pipe, which Markdown tables cannot keep", async () => {
     const header = (content: unknown[]) => ({ type: "tableHeader", content: [paragraph(...content)] });
     const issue = {
@@ -443,11 +516,12 @@ describe("writeDescription", () => {
     const issue = { description: doc(first, paragraph(text("b"))) };
     const puts = stubJira(issue);
 
-    // The new line right under the list continues its item.
+    // The new line right under the list continues its item; the list keeps its id.
     await writeDescription(connection, { sourceId: SOURCE_ID, text: "- a\n  more\n\nb", expected: "- a\n\nb" });
     const written = writtenDescription(puts) as { content: unknown[] };
     expect(written.content[0]).toEqual({
       type: "bulletList",
+      attrs: { localId: "l1" },
       content: [{ type: "listItem", content: [paragraph(text("a"), { type: "hardBreak" }, text("more"))] }],
     });
     expect(written.content[1]).toEqual(paragraph(text("b")));

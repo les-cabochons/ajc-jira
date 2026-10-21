@@ -100,9 +100,16 @@ one GET of its description and attachments.
   line there stayed. Only changed blocks are written from the Markdown, and a
   kept block that Markdown would read as one with the change joins it. A
   description of empty paragraphs only keeps them after the new text.
-- A check runs on the result: every source block whose Markdown the edit kept
-  must be in the write as it was. One that is not must lose only what the
-  user allowed, or nothing is written.
+- The same holds inside a block the edit changed: its children are lined up
+  with the source block's children by their Markdown, at every depth (table
+  rows and cells, list and task items, quotes). A child that reads the same is
+  the source child itself; a changed child keeps its ids and the attributes
+  Markdown has no place for, and a mention, inline file or smart link in
+  changed text keeps its source attributes.
+- A check runs on the result, at every depth: every source node whose
+  Markdown the edit kept must be in the write as it was, and a changed one
+  must keep its ids. One that is not must lose only what the user allowed, or
+  nothing is written.
 - Blocks that read the same but differ in Jira are kept only where every
   optimal line alignment agrees on which one stayed; otherwise, as when one of
   two is deleted, nothing is written and the error says to edit in Jira.

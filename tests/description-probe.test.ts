@@ -130,6 +130,35 @@ function generate(next: () => number) {
   return { type: "doc", version: 1, content: Array.from({ length: 1 + Math.floor(next() * 4) }, () => block(0)) };
 }
 
+/** Gives every node an id, and mentions, cells and tables neutral attributes. */
+function decorate<T>(value: T): T {
+  let count = 0;
+  const walk = (node: Node): Node => {
+    const copy: Node = { ...node };
+    if (node.type !== "text" && node.type !== "doc") {
+      const attrs: Record<string, unknown> = { ...(node.attrs ?? {}), localId: `n${(count += 1)}` };
+      if (node.type === "mention") Object.assign(attrs, { accessLevel: "CONTAINER", userType: "DEFAULT" });
+      if (node.type === "tableHeader" || node.type === "tableCell") Object.assign(attrs, { colspan: 1, rowspan: 1 });
+      if (node.type === "table") Object.assign(attrs, { isNumberColumnEnabled: false, layout: "center", width: 760 });
+      if (node.type === "hardBreak") Object.assign(attrs, { text: "\n" });
+      copy.attrs = attrs;
+    }
+    if (Array.isArray(node.content)) copy.content = node.content.map(walk);
+    return copy;
+  };
+  return walk(value as Node) as T;
+}
+
+/** Changes one line inside a block: a table row's last cell, or the line's end. */
+function editLine(markdown: string, pick: number) {
+  const lines = markdown.split("\n");
+  const at = Math.floor(pick * lines.length);
+  const line = lines[at]!;
+  if (/^\s*(?:```|~~~|\| ---)/.test(line) || line.trim() === "") return markdown;
+  lines[at] = line.startsWith("|") ? line.replace(/ \|$/, " zz |") : `${line} zz`;
+  return lines.join("\n");
+}
+
 describe("generated descriptions", () => {
   it("never change silently: a description that names no loss writes back as the same ADF", () => {
     const failures: unknown[] = [];
@@ -200,26 +229,31 @@ describe("generated descriptions", () => {
       (parts: string[], at: number) => [parts[at]!, ...parts.filter((_, index) => index !== at)],
       (parts: string[], at: number) => [...parts.filter((_, index) => index !== at), parts[at]!],
       (parts: string[], at: number) => [...parts, parts[at]!],
+      // Edits inside a block: a table cell, a list or task item, a quote's line.
+      (parts: string[], at: number, pick: number) => parts.map((part, index) => (index === at ? editLine(part, pick) : part)),
+      (parts: string[], at: number, pick: number) => parts.map((part, index) => (index === at ? editLine(part, pick) : part)),
+      (parts: string[], at: number, pick: number) => parts.map((part, index) => (index === at ? editLine(part, pick) : part)),
     ];
     let refused = 0;
     let checked = 0;
-    for (let seed = 1; seed <= 2000 && failures.length < 4; seed += 1) {
+    for (let seed = 1; seed <= 3000 && failures.length < 4; seed += 1) {
       const next = random(seed);
-      const value = generate(next);
-      // Every block has its own id, so keeping it means keeping that very block.
-      const content = value.content.map((node, index) => ({ ...node, attrs: { ...(node.attrs ?? {}), localId: `b${index}` } }));
-      const source = { ...value, content: content.flatMap((node) => (next() < 0.3 ? [{ type: "paragraph" }, node] : [node])) };
+      // Every node has its own id, and mentions, cells and tables the
+      // attributes Markdown has no place for, so keeping a node means keeping
+      // that very node.
+      const value = decorate(generate(next));
+      const source = { ...value, content: value.content.flatMap((node) => (next() < 0.3 ? [{ type: "paragraph" }, node] : [node])) };
       if (describeJiraDescription(source, context).lost?.includes(NOT_WRITABLE_EXACTLY)) continue;
       const read = adfToMarkdownParts(source, context)!;
       const at = Math.floor(next() * read.parts.length);
       const edit = edits[Math.floor(next() * edits.length)]!;
-      const markdown = edit(read.parts.map((part) => part.markdown), at).join("\n\n");
+      const markdown = edit(read.parts.map((part) => part.markdown), at, next()).join("\n\n");
       let written;
       try {
         written = patchDescriptionAdf(source, markdown, context);
       } catch (error) {
         // An ambiguous edit is refused, never guessed.
-        expect(String(error)).toMatch(/cannot tell which you kept/);
+        expect(String(error)).toMatch(/cannot tell which you kept|too large/);
         refused += 1;
         continue;
       }
@@ -228,8 +262,9 @@ describe("generated descriptions", () => {
       if ((adfToMarkdown(written, context) ?? "") !== expected) {
         failures.push({ seed, kind: "reads", markdown, expected, written: adfToMarkdown(written, context) });
       }
-      // The source-level guard: every block whose Markdown the edit kept is
-      // in the write as its very source ADF, ids and attributes included.
+      // The source-level guard, at every depth: every node whose Markdown the
+      // edit kept is in the write as its very source ADF, ids and attributes
+      // included, and a changed node keeps its ids.
       const rebuilt = rebuiltBlocks(source, written, markdown, context);
       if (rebuilt.length > 0) failures.push({ seed, kind: "rebuilt", markdown, rebuilt: JSON.stringify(rebuilt) });
     }

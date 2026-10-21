@@ -3,6 +3,7 @@ import type {
   BacklogWriteDescriptionResult,
 } from "./contract.js";
 import { describeJiraDescriptionFully, MAX_LOST } from "./description.js";
+import { documentOf } from "./description-nested.js";
 import { patchDescriptionAdf, rebuiltBlocks } from "./description-patch.js";
 import { fetchDescribedIssue, requireIssueKey } from "./description-source.js";
 import { buildIssueUrl, describeIssue, requestJira, type JiraConnectionInput } from "./jira.js";
@@ -68,7 +69,7 @@ export async function writeJiraDescription(
     // was; one that is not loses only what the user allowed, or nothing goes.
     for (const block of isDocument(source) ? rebuiltBlocks(source, description, request.text, context) : []) {
       const blockLost =
-        describeJiraDescriptionFully({ type: "doc", version: 1, content: [block] }, context).lost ?? [];
+        describeJiraDescriptionFully(documentOf(block), context).lost ?? [];
       if (blockLost.length === 0 || blockLost.some((loss) => !allowed.includes(loss))) {
         throw new Error(
           "Ajour cannot write this edit without changing parts of the description you did not edit. Edit it in Jira.",

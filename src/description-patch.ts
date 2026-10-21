@@ -1,5 +1,14 @@
-import { adfToMarkdownParts, type AdfImageContext, type AdfNode } from "./adf-markdown.js";
+import { adfToMarkdown, adfToMarkdownParts, type AdfImageContext, type AdfNode } from "./adf-markdown.js";
 import { markdownToAdf, type AdfDocument, type AdfOutNode } from "./markdown-adf.js";
+import {
+  AMBIGUOUS_EDIT,
+  alignLines,
+  reconcileDocument,
+  rebuiltNested,
+  withoutIds,
+} from "./description-nested.js";
+
+export { AMBIGUOUS_EDIT };
 
 // Writes an edited description back into its ADF, keeping every top-level
 // block the user did not change exactly as it was, attributes and formatting
@@ -8,74 +17,6 @@ import { markdownToAdf, type AdfDocument, type AdfOutNode } from "./markdown-adf
 // the Markdown. A block found where the user moved it is kept too. When
 // blocks that read the same differ in Jira and the edit leaves it open which
 // one stayed, the write is refused rather than guessed.
-
-/** Past this many line pairs, a line diff costs too much; only the edges are matched. */
-const MAX_DIFF_CELLS = 4_000_000;
-
-export const AMBIGUOUS_EDIT =
-  "This edit moves or removes blocks that read the same but differ in Jira, so Ajour cannot tell which you kept. Edit the description in Jira.";
-
-/**
- * A longest common subsequence line diff, weighing every optimal alignment.
- * `match` is one of them; a line is `certain` when every optimal alignment
- * matches it to that same line, and `optional` when some match it and some do
- * not, or match it elsewhere. Undefined past the size budget.
- */
-function alignLines(before: string[], after: string[]) {
-  const n = before.length;
-  const m = after.length;
-  const width = m + 1;
-  if ((n + 1) * width > MAX_DIFF_CELLS) return undefined;
-  // Longest common subsequences of the prefixes, and of the suffixes.
-  const prefix = new Uint32Array((n + 1) * width);
-  for (let i = 1; i <= n; i += 1) {
-    for (let j = 1; j <= m; j += 1) {
-      prefix[i * width + j] =
-        before[i - 1] === after[j - 1]
-          ? prefix[(i - 1) * width + j - 1]! + 1
-          : Math.max(prefix[(i - 1) * width + j]!, prefix[i * width + j - 1]!);
-    }
-  }
-  const suffix = new Uint32Array((n + 1) * width);
-  for (let i = n - 1; i >= 0; i -= 1) {
-    for (let j = m - 1; j >= 0; j -= 1) {
-      suffix[i * width + j] =
-        before[i] === after[j]
-          ? suffix[(i + 1) * width + j + 1]! + 1
-          : Math.max(suffix[(i + 1) * width + j]!, suffix[i * width + j + 1]!);
-    }
-  }
-  const total = suffix[0]!;
-
-  const match = new Array<number>(n).fill(-1);
-  for (let i = 0, j = 0; i < n && j < m; ) {
-    if (before[i] === after[j] && suffix[i * width + j] === suffix[(i + 1) * width + j + 1]! + 1) {
-      match[i] = j;
-      i += 1;
-      j += 1;
-    } else if (suffix[(i + 1) * width + j]! >= suffix[i * width + j + 1]!) {
-      i += 1;
-    } else {
-      j += 1;
-    }
-  }
-
-  const certain = new Array<boolean>(n).fill(false);
-  const optional = new Array<boolean>(n).fill(false);
-  for (let i = 0; i < n; i += 1) {
-    let pairs = 0;
-    let skippable = false;
-    for (let j = 0; j <= m; j += 1) {
-      if (prefix[i * width + j]! + suffix[(i + 1) * width + j]! === total) skippable = true;
-      if (j < m && before[i] === after[j] && prefix[i * width + j]! + 1 + suffix[(i + 1) * width + j + 1]! === total) {
-        pairs += 1;
-      }
-    }
-    certain[i] = pairs === 1 && !skippable;
-    optional[i] = pairs > 0 && !certain[i];
-  }
-  return { match, certain, optional };
-}
 
 /** The lines both start and end with, when a full diff costs too much. */
 function edgeMatch(before: string[], after: string[]) {
@@ -97,11 +38,6 @@ function edgeMatch(before: string[], after: string[]) {
 
 function isBlank(line: string | undefined) {
   return line !== undefined && /^[ \t]*$/.test(line);
-}
-
-/** A node as JSON without the ids that only name it. */
-function withoutIds(node: unknown): string {
-  return JSON.stringify(node, (key, value) => (key === "localId" ? undefined : value));
 }
 
 function editedLines(markdown: string) {
@@ -210,6 +146,24 @@ export function patchDescriptionAdf(source: unknown, markdown: string, context: 
     });
   }
 
+  /**
+   * The document with each rebuilt block given what its source block keeps,
+   * below the top level. It must read as it did; otherwise the guard, which
+   * the write runs, decides.
+   */
+  const reconcile = (document: AdfDocument): AdfDocument => {
+    const reconciled = {
+      ...document,
+      content: reconcileDocument(
+        content,
+        parts.map((part) => content[part.index]!),
+        document.content as AdfNode[],
+        context,
+      ) as AdfOutNode[],
+    };
+    return adfToMarkdown(reconciled, context) === adfToMarkdown(document, context) ? reconciled : document;
+  };
+
   /** The empty paragraphs and other blocks with no Markdown between two parts. */
   const gapNodes = (gap: number) => content.slice(parts[gap]!.index + 1, parts[gap + 1]!.index);
 
@@ -256,9 +210,9 @@ export function patchDescriptionAdf(source: unknown, markdown: string, context: 
       const { document, pieces } = build(splitAtGaps);
       // Kept blocks read as they did, even one whose Markdown would not
       // write back as itself: the user left it alone.
-      if (JSON.stringify(pieces.flatMap((piece) => blocksOf(piece, context))) === target) return document;
+      if (JSON.stringify(pieces.flatMap((piece) => blocksOf(piece, context))) === target) return reconcile(document);
     }
-    if (placed.every((place) => !place)) return build(false).document;
+    if (placed.every((place) => !place)) return reconcile(build(false).document);
     // The kept blocks next to changed text join it, and the write is tried
     // again. `rebuiltBlocks` then tells the write which source blocks went.
     const kept = new Set<number>();
@@ -290,11 +244,11 @@ export function patchDescriptionAdf(source: unknown, markdown: string, context: 
 }
 
 /**
- * The source's top-level blocks whose Markdown the edit kept but which the
- * written ADF does not hold as they were, ids and attributes included. A
- * block counts as kept as many times as the edit, read whole, still holds its
+ * The source's nodes whose Markdown the edit kept but which the written ADF
+ * does not hold as they were, ids and attributes included. A top-level block
+ * counts as kept as many times as the edit, read whole, still holds its
  * Markdown as a block, and as present as many times as the written ADF holds
- * a block deep-equal to it.
+ * a block deep-equal to it. Below, see `rebuiltNested`.
  */
 export function rebuiltBlocks(
   source: unknown,
@@ -334,5 +288,8 @@ export function rebuiltBlocks(
     const present = nodes.length - missing.length;
     rebuilt.push(...missing.slice(0, Math.max(0, Math.min(nodes.length, kept) - present)));
   }
-  return rebuilt;
+  // Below the top level, in every block the write rebuilt.
+  const parts = read.parts.map((part) => read.content[part.index]!);
+  rebuilt.push(...rebuiltNested(read.content, parts, written.content as AdfNode[], context));
+  return [...new Set(rebuilt)];
 }
