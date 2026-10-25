@@ -20,10 +20,10 @@ export function requireIssueKey(sourceId: string) {
 
 /** The issue's description and the attachments its images point at. */
 export async function fetchDescribedIssue(config: JiraConnectionInput, key: string) {
-  return await requestJira<JiraIssue>(
-    config,
-    `/rest/api/3/issue/${encodeURIComponent(key)}?fields=description,attachment`,
-  );
+  return await requestJira<JiraIssue>(config, {
+    path: `/rest/api/3/issue/${encodeURIComponent(key)}`,
+    query: { fields: "description,attachment" },
+  });
 }
 
 /**

@@ -1,24 +1,15 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ConnectorPriorityLevel } from "../src/contract.ts";
-import { syncJiraConnection, type JiraConnectionInput } from "../src/jira.ts";
+import { syncJiraConnection } from "../src/jira.ts";
 import { listJiraSettleStates, writeJiraSettle } from "../src/settle.ts";
-
-const BASE = "https://acme.atlassian.net";
+import { BASE, installAjour, jiraInput, json, noContent } from "./support/jira-ajour.ts";
 
 function sourceId(key: string) {
   return `${BASE}/browse/${key}`;
 }
 
-function buildConnection(): JiraConnectionInput {
-  return {
-    id: "connection-1",
-    label: "Main Jira",
-    tenantLabel: "Acme",
-    baseUrl: BASE,
-    email: "me@acme.test",
-    apiToken: "secret",
-    queryScope: "assigned_to_me",
-  };
+function buildConnection() {
+  return jiraInput();
 }
 
 const CATEGORIES = {
@@ -38,19 +29,11 @@ interface FakeIssue {
   transitions?: Array<{ id: string; to: ReturnType<typeof status> }>;
 }
 
-function json(body: unknown, status = 200) {
-  return new Response(JSON.stringify(body), {
-    status,
-    headers: { "Content-Type": "application/json" },
-  });
-}
-
 /**
  * A small Jira: searches return the issues the JQL names, or the open ones;
  * transitions move an issue to their target status; PUT sets the priority.
  */
 function fakeJira(issues: Record<string, FakeIssue>) {
-  const requests: Array<{ method: string; path: string; body?: unknown }> = [];
   const fields = (key: string) => {
     const issue = issues[key]!;
     return {
@@ -61,13 +44,10 @@ function fakeJira(issues: Record<string, FakeIssue>) {
       project: { name: "Mercury" },
     };
   };
-  const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
-    const url = new URL(String(input));
-    const method = init?.method ?? "GET";
-    const body = init?.body ? JSON.parse(String(init.body)) : undefined;
-    requests.push({ method, path: url.pathname, body });
+  return installAjour((request) => {
+    const body = request.body;
 
-    if (url.pathname.startsWith("/rest/api/3/search")) {
+    if (request.path.startsWith("/rest/api/3/search")) {
       const named = /issuekey in \((.*)\)/.exec(body.jql as string)?.[1];
       const keys = named
         ? named.split(",").map((key) => key.trim().replace(/"/g, ""))
@@ -77,37 +57,34 @@ function fakeJira(issues: Record<string, FakeIssue>) {
       });
     }
 
-    const transitionPath = /^\/rest\/api\/3\/issue\/([^/]+)\/transitions$/.exec(url.pathname);
+    const transitionPath = /^\/rest\/api\/3\/issue\/([^/]+)\/transitions$/.exec(request.path);
     if (transitionPath) {
       const issue = issues[transitionPath[1]!]!;
-      if (method === "POST") {
+      if (request.method === "POST") {
         const transition = issue.transitions?.find((candidate) => candidate.id === body.transition.id);
         issue.status = transition!.to;
-        return new Response(null, { status: 204 });
+        return noContent();
       }
       return json({ transitions: issue.transitions ?? [] });
     }
 
-    const issuePath = /^\/rest\/api\/3\/issue\/([^/]+)$/.exec(url.pathname);
+    const issuePath = /^\/rest\/api\/3\/issue\/([^/]+)$/.exec(request.path);
     if (issuePath) {
       const key = issuePath[1]!;
-      if (method === "PUT") {
+      if (request.method === "PUT") {
         issues[key]!.priority = body.fields.priority.name;
-        return new Response(null, { status: 204 });
+        return noContent();
       }
       return json({ id: key, key, fields: fields(key) });
     }
 
-    throw new Error(`Unexpected request: ${method} ${url.pathname}`);
+    throw new Error(`Unexpected request: ${request.label}`);
   });
-  vi.stubGlobal("fetch", fetchMock);
-  return { requests };
 }
 
 describe("Jira status categories in sync", () => {
   afterEach(() => {
     vi.unstubAllGlobals();
-    vi.restoreAllMocks();
   });
 
   it("reports each issue's category and Ajour's issues that reached Done", async () => {
@@ -156,7 +133,6 @@ describe("Jira status categories in sync", () => {
 describe("Jira settle", () => {
   afterEach(() => {
     vi.unstubAllGlobals();
-    vi.restoreAllMocks();
   });
 
   const waiting = status("Waiting for customer", "indeterminate");
@@ -212,6 +188,20 @@ describe("Jira settle", () => {
       stateDone: true,
       priority: "high",
     });
+  });
+
+  it("sends each settle request with its exact method, path, query and content type", async () => {
+    const jira = fakeJira({ "ABC-7": issueInProgress() });
+
+    await writeJiraSettle(buildConnection(), { sourceId: sourceId("ABC-7"), state: "done", priority: "high" });
+
+    expect(jira.requests.map((request) => [request.label, request.contentType])).toEqual([
+      ["PUT /rest/api/3/issue/ABC-7", "application/json"],
+      ["GET /rest/api/3/issue/ABC-7?fields=status,priority", undefined],
+      ["GET /rest/api/3/issue/ABC-7/transitions", undefined],
+      ["POST /rest/api/3/issue/ABC-7/transitions", "application/json"],
+      ["GET /rest/api/3/issue/ABC-7?fields=status,priority", undefined],
+    ]);
   });
 
   it("skips the transition when the issue is already in that status", async () => {

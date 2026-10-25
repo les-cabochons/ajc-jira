@@ -1,36 +1,15 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { readDescription, syncConnection } from "../src/plugin.ts";
+import { BASE, installAjour, json, pluginConnection } from "./support/jira-ajour.ts";
 
-const BASE = "https://acme.atlassian.net";
 const ISSUE_URL = `${BASE}/browse/ABC-1`;
 const SHOT_URL = `${BASE}/rest/api/3/attachment/content/10010`;
 
-const connection = {
-  id: "connection-1",
-  pluginId: "jira",
-  label: "Main Jira",
-  tenantLabel: "Acme",
-  autoSync: false,
-  autoSyncIntervalMinutes: 15,
-  connectedAt: 0,
-  config: {
-    baseUrl: BASE,
-    email: "me@acme.test",
-    apiToken: "secret",
-    queryScope: "assigned_to_me",
-  },
-};
+const connection = pluginConnection();
 
 const text = (value: string, marks?: unknown[]) => ({ type: "text", text: value, ...(marks ? { marks } : {}) });
 const paragraph = (...content: unknown[]) => ({ type: "paragraph", content });
 const doc = (...content: unknown[]) => ({ type: "doc", version: 1, content });
-
-function json(body: unknown, status = 200) {
-  return new Response(JSON.stringify(body), {
-    status,
-    headers: { "Content-Type": "application/json" },
-  });
-}
 
 interface FakeIssue {
   description?: unknown;
@@ -40,7 +19,6 @@ interface FakeIssue {
 
 /** A small Jira: searches return the open issues, or those the JQL names; GET returns one issue. */
 function fakeJira(issues: Record<string, FakeIssue>) {
-  const requests: Array<{ method: string; path: string; search: string; body?: unknown }> = [];
   const fields = (key: string) => ({
     summary: `Issue ${key}`,
     status: issues[key]!.done
@@ -51,40 +29,31 @@ function fakeJira(issues: Record<string, FakeIssue>) {
     description: issues[key]!.description ?? null,
     attachment: issues[key]!.attachment ?? [],
   });
-  vi.stubGlobal(
-    "fetch",
-    vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
-      const url = new URL(String(input));
-      const method = init?.method ?? "GET";
-      const body = init?.body ? JSON.parse(String(init.body)) : undefined;
-      requests.push({ method, path: url.pathname, search: url.search, body });
+  const { requests } = installAjour((request) => {
+    if (request.path.startsWith("/rest/api/3/search")) {
+      const named = /issuekey in \((.*)\)/.exec(request.body.jql as string)?.[1];
+      const keys = named
+        ? named.split(",").map((key) => key.trim().replace(/"/g, ""))
+        : Object.keys(issues).filter((key) => !issues[key]!.done);
+      return json({
+        issues: keys.filter((key) => issues[key]).map((key) => ({ id: key, key, fields: fields(key) })),
+      });
+    }
 
-      if (url.pathname.startsWith("/rest/api/3/search")) {
-        const named = /issuekey in \((.*)\)/.exec(body.jql as string)?.[1];
-        const keys = named
-          ? named.split(",").map((key) => key.trim().replace(/"/g, ""))
-          : Object.keys(issues).filter((key) => !issues[key]!.done);
-        return json({
-          issues: keys.filter((key) => issues[key]).map((key) => ({ id: key, key, fields: fields(key) })),
-        });
-      }
+    const issuePath = /^\/rest\/api\/3\/issue\/([^/]+)$/.exec(request.path);
+    if (issuePath && request.method === "GET") {
+      const key = issuePath[1]!;
+      if (!issues[key]) return json({ errorMessages: ["Issue does not exist"] }, 404);
+      return json({ id: key, key, fields: fields(key) });
+    }
 
-      const issuePath = /^\/rest\/api\/3\/issue\/([^/]+)$/.exec(url.pathname);
-      if (issuePath && method === "GET") {
-        const key = issuePath[1]!;
-        if (!issues[key]) return json({ errorMessages: ["Issue does not exist"] }, 404);
-        return json({ id: key, key, fields: fields(key) });
-      }
-
-      throw new Error(`Unexpected request: ${method} ${url.pathname}`);
-    }),
-  );
+    throw new Error(`Unexpected request: ${request.label}`);
+  });
   return { requests };
 }
 
 afterEach(() => {
   vi.unstubAllGlobals();
-  vi.restoreAllMocks();
 });
 
 describe("descriptions in a sync", () => {
@@ -210,7 +179,7 @@ describe("readDescription", () => {
     await expect(readDescription(connection, { sourceId: ISSUE_URL })).resolves.toEqual({
       description: { text: "Now underlined", lost: ["underline"] },
     });
-    expect(jira.requests.map((request) => `${request.method} ${request.path}${request.search}`)).toEqual([
+    expect(jira.requests.map((request) => request.label)).toEqual([
       "GET /rest/api/3/issue/ABC-1?fields=description,attachment",
     ]);
   });

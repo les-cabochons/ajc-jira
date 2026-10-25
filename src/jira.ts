@@ -1,3 +1,4 @@
+import type {} from "@ajour/plugin-sdk/globals";
 import type {
   ConnectorImportCandidateInput,
   ConnectorPluginSyncResult,
@@ -14,13 +15,17 @@ const CLOSED_STATUS_CATEGORY = "done";
 const MAX_RESULTS = 200;
 const MAX_CANDIDATE_NOTE_LENGTH = 4000;
 
+/**
+ * What a sync needs of a connection. The API token is not here: Ajour's
+ * broker holds it and attaches the Basic credential to every request.
+ */
 export interface JiraConnectionInput {
-  id?: string;
+  /** The connection `ajour.http` sends through. */
+  id: string;
   label: string;
   tenantLabel: string;
   baseUrl: string;
   email: string;
-  apiToken: string;
   projectKey?: string;
   queryScope: JiraQueryScope;
   originalEstimateFieldName?: string;
@@ -67,10 +72,6 @@ export interface JiraIssue {
 
 function normalizeBaseUrl(value: string) {
   return value.replace(/\/+$/, "");
-}
-
-function createAuthHeader(email: string, apiToken: string) {
-  return `Basic ${Buffer.from(`${email}:${apiToken}`, "utf8").toString("base64")}`;
 }
 
 export function normalizeDisplayValue(value: unknown): string | undefined {
@@ -161,32 +162,50 @@ export function buildJql(config: JiraConnectionInput, issueKeys?: string[]) {
   return `${clauses.join(" AND ")} ORDER BY updated DESC`;
 }
 
-export async function requestJira<T>(
-  config: JiraConnectionInput,
-  pathname: string,
-  init?: RequestInit,
-): Promise<T> {
-  const url = `${normalizeBaseUrl(config.baseUrl)}${pathname}`;
+/** A request to Jira, relative to the connection's site URL. */
+export interface JiraRequest {
+  method?: "GET" | "POST" | "PUT";
+  /** An endpoint the manifest declares, such as `/rest/api/3/issue/ENG-1`. */
+  path: string;
+  query?: Record<string, string>;
+  /** Sent as JSON. */
+  body?: unknown;
+  signal?: AbortSignal;
+}
 
-  let response: Response;
+/**
+ * Sends the request through `ajour.http`, so Ajour's broker builds the URL
+ * from the saved site address and attaches the Basic credential. The plugin
+ * sets neither.
+ */
+export async function requestJira<T>(config: JiraConnectionInput, request: JiraRequest): Promise<T> {
+  const hasBody = request.body !== undefined;
+
+  let response: Awaited<ReturnType<typeof ajour.http>>;
   try {
-    response = await fetch(url, {
-      ...init,
-      headers: {
-        Accept: "application/json",
-        Authorization: createAuthHeader(config.email, config.apiToken),
-        "Content-Type": "application/json",
-        ...init?.headers,
-      },
+    response = await ajour.http({
+      connectionId: config.id,
+      method: request.method ?? "GET",
+      path: request.path,
+      ...(request.query ? { query: request.query } : {}),
+      headers: hasBody
+        ? { Accept: "application/json", "Content-Type": "application/json" }
+        : { Accept: "application/json" },
+      ...(hasBody ? { body: JSON.stringify(request.body) } : {}),
+      ...(request.signal ? { signal: request.signal } : {}),
     });
   } catch (error) {
+    if (error instanceof Error && error.name === "AbortError") throw error;
     throw new Error(`Jira request failed: ${error instanceof Error ? error.message : "Network error"}`);
   }
 
+  // Updates and transitions answer 204 No Content.
+  const text = await response.text();
+
   if (!response.ok) {
-    let detail = response.statusText || "Request failed";
+    let detail = "Request failed";
     try {
-      const payload = (await response.json()) as {
+      const payload = JSON.parse(text) as {
         errorMessages?: string[];
         errors?: Record<string, unknown>;
         message?: string;
@@ -206,8 +225,6 @@ export async function requestJira<T>(
     throw new Error(`Jira request failed (${response.status}): ${detail}`);
   }
 
-  // Updates and transitions answer 204 No Content.
-  const text = await response.text();
   return (text ? JSON.parse(text) : undefined) as T;
 }
 
@@ -235,14 +252,11 @@ export async function searchIssues(
   };
 
   try {
-    const response = await requestJira<JiraSearchResponse>(
-      config,
-      "/rest/api/3/search/jql",
-      {
-        method: "POST",
-        body: JSON.stringify(body),
-      },
-    );
+    const response = await requestJira<JiraSearchResponse>(config, {
+      method: "POST",
+      path: "/rest/api/3/search/jql",
+      body,
+    });
 
     return response.issues ?? [];
   } catch (error) {
@@ -251,14 +265,11 @@ export async function searchIssues(
       throw error;
     }
 
-    const fallback = await requestJira<JiraSearchResponse>(
-      config,
-      "/rest/api/3/search",
-      {
-        method: "POST",
-        body: JSON.stringify(body),
-      },
-    );
+    const fallback = await requestJira<JiraSearchResponse>(config, {
+      method: "POST",
+      path: "/rest/api/3/search",
+      body,
+    });
 
     return fallback.issues ?? [];
   }
@@ -273,14 +284,11 @@ async function updateJiraIssueFields(
     return;
   }
 
-  await requestJira(
-    config,
-    `/rest/api/3/issue/${encodeURIComponent(issueKey)}`,
-    {
-      method: "PUT",
-      body: JSON.stringify({ fields }),
-    },
-  );
+  await requestJira(config, {
+    method: "PUT",
+    path: `/rest/api/3/issue/${encodeURIComponent(issueKey)}`,
+    body: { fields },
+  });
 }
 
 function normalizeConfiguredFieldName(value: string | undefined): string | undefined {
@@ -345,7 +353,7 @@ async function resolveJiraFieldMetadata(
   }
 
   const normalizedLookupValue = normalizeLookupValue(normalizedConfiguredFieldName);
-  const fields = await requestJira<JiraFieldDefinition[]>(config, "/rest/api/3/field");
+  const fields = await requestJira<JiraFieldDefinition[]>(config, { path: "/rest/api/3/field" });
 
   const idMatch = requireSingleJiraFieldMatch(
     normalizedConfiguredFieldName,
@@ -420,7 +428,7 @@ function mapIssueToCandidate(
   if (isSubtask(issue)) {
     return {
       source: "jira",
-      connectionId: config.id ?? "unknown_connection",
+      connectionId: config.id,
       connectionLabel: config.label,
       tenantLabel: config.tenantLabel,
       sourceId: buildIssueUrl(config, issue.key),
@@ -460,7 +468,7 @@ function mapIssueToCandidate(
 
   return {
     source: "jira",
-    connectionId: config.id ?? "unknown_connection",
+    connectionId: config.id,
     connectionLabel: config.label,
     tenantLabel: config.tenantLabel,
     sourceId: buildIssueUrl(config, issue.key),
@@ -662,7 +670,7 @@ async function buildJiraWorkItemUpdates(
 }
 
 export async function validateJiraConnection(config: JiraConnectionInput) {
-  const account = await requestJira<{ accountId?: string }>(config, "/rest/api/3/myself");
+  const account = await requestJira<{ accountId?: string }>(config, { path: "/rest/api/3/myself" });
   const originalEstimateField = await resolveJiraFieldMetadata(config, config.originalEstimateFieldName);
   const remainingEstimateField = await resolveJiraFieldMetadata(config, config.remainingEstimateFieldName);
   const completedEstimateField = await resolveJiraFieldMetadata(config, config.completedEstimateFieldName);
@@ -674,7 +682,6 @@ export async function validateJiraConnection(config: JiraConnectionInput) {
     normalizedConfig: compactFieldValues({
       baseUrl: normalizeBaseUrl(config.baseUrl),
       email: config.email.trim(),
-      apiToken: config.apiToken,
       projectKey: config.projectKey?.trim() || undefined,
       queryScope: config.queryScope,
       originalEstimateFieldName: originalEstimateField?.configuredName,
@@ -740,7 +747,7 @@ async function findDoneIssues(
     return [
       {
         source: "jira",
-        connectionId: config.id ?? "unknown_connection",
+        connectionId: config.id,
         connectionLabel: config.label,
         tenantLabel: config.tenantLabel,
         sourceId,

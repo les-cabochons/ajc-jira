@@ -5,7 +5,6 @@ import {
   mkdir,
   readFile,
   rm,
-  writeFile,
 } from "node:fs/promises";
 import { create } from "tar";
 import { assertConnectorPluginManifest } from "./connector-manifest.mjs";
@@ -44,12 +43,6 @@ if (
     "Connector manifest entrypoint must be a regular compiled JavaScript file.",
   );
 }
-
-await writeFile(
-  path.join(pluginRoot, "dist", "package.json"),
-  `${JSON.stringify({ type: "module" }, null, 2)}\n`,
-  "utf8",
-);
 
 const outputDirectory = path.join(pluginRoot, "package");
 const outputPath = path.join(

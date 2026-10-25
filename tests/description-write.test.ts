@@ -1,36 +1,16 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import type { FakeResponseInit } from "@ajour/plugin-sdk/testing";
 import { writeDescription } from "../src/plugin.ts";
+import { BASE, installAjour, json, noContent, pluginConnection } from "./support/jira-ajour.ts";
 
-const BASE = "https://acme.atlassian.net";
 const SOURCE_ID = `${BASE}/browse/ABC-7`;
 const ISSUE_PATH = "/rest/api/3/issue/ABC-7";
 
-const connection = {
-  id: "connection-1",
-  pluginId: "jira",
-  label: "Main Jira",
-  tenantLabel: "Acme",
-  autoSync: false,
-  autoSyncIntervalMinutes: 15,
-  connectedAt: 0,
-  config: {
-    baseUrl: BASE,
-    email: "me@acme.test",
-    apiToken: "secret",
-    queryScope: "assigned_to_me",
-  },
-};
+const connection = pluginConnection();
 
 const text = (value: string, marks?: unknown[]) => ({ type: "text", text: value, ...(marks ? { marks } : {}) });
 const paragraph = (...content: unknown[]) => ({ type: "paragraph", content });
 const doc = (...content: unknown[]) => ({ type: "doc", version: 1, content });
-
-function json(body: unknown, status = 200) {
-  return new Response(JSON.stringify(body), {
-    status,
-    headers: { "Content-Type": "application/json" },
-  });
-}
 
 interface Issue {
   description: unknown;
@@ -40,26 +20,24 @@ interface Issue {
  * Jira holding one issue. A PUT that `refuse` answers for, or made after
  * `changeBeforePut` changed the issue, changes nothing more.
  */
-function stubJira(issue: Issue, options: { refuse?: Response; changeBeforePut?: unknown } = {}) {
+function stubJira(issue: Issue, options: { refuse?: FakeResponseInit; changeBeforePut?: unknown } = {}) {
   const puts: unknown[] = [];
-  vi.stubGlobal(
-    "fetch",
-    vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
-      const url = new URL(String(input));
-      expect(url.pathname).toBe(ISSUE_PATH);
-      if (init?.method !== "PUT") {
-        return json({ id: "10007", key: "ABC-7", fields: { description: issue.description, attachment: [] } });
-      }
-      const body = JSON.parse(String(init.body)) as { fields: { description: unknown } };
-      puts.push(body);
-      if (options.changeBeforePut !== undefined) {
-        issue.description = options.changeBeforePut;
-      }
-      if (options.refuse) return options.refuse;
-      issue.description = body.fields.description;
-      return new Response(null, { status: 204 });
-    }),
-  );
+  installAjour((request) => {
+    expect(request.path).toBe(ISSUE_PATH);
+    if (request.method !== "PUT") {
+      expect(request.query).toEqual({ fields: "description,attachment" });
+      return json({ id: "10007", key: "ABC-7", fields: { description: issue.description, attachment: [] } });
+    }
+    expect(request.contentType).toBe("application/json");
+    const body = request.body as { fields: { description: unknown } };
+    puts.push(body);
+    if (options.changeBeforePut !== undefined) {
+      issue.description = options.changeBeforePut;
+    }
+    if (options.refuse) return options.refuse;
+    issue.description = body.fields.description;
+    return noContent();
+  });
   return puts;
 }
 

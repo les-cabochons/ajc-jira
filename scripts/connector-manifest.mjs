@@ -102,6 +102,73 @@ function assertConnectionField(field, index) {
   assertOptionalFiniteNumber(field.step, label + ".step");
 }
 
+const httpMethods = new Set(["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE"]);
+
+// Headers a plugin may never set, whatever its manifest lists. Ajour's broker
+// refuses them, so a manifest that lists one never installs.
+const deniedRequestHeaders = new Set([
+  "authorization",
+  "cookie",
+  "host",
+  "forwarded",
+  "content-length",
+  "transfer-encoding",
+  "connection",
+]);
+
+/**
+ * The part of plugin API 4 this plugin relies on: its requests go through
+ * Ajour's broker, which builds the URL from the base address field and attaches
+ * the credential, so the manifest must name both and the endpoints it calls.
+ * Ajour validates the whole manifest again at install.
+ */
+function assertNetwork(manifest) {
+  assertRecord(manifest.network, "Connector manifest network");
+  const { auth, baseAddress, endpoints, requestHeaders } = manifest.network;
+  const fields = new Map(manifest.connectionFields.map((field) => [field.id, field]));
+
+  assertRecord(auth, "Connector manifest network.auth");
+  if (auth.scheme !== "basic") {
+    throw new Error("Connector manifest network.auth must use the basic scheme.");
+  }
+  if (fields.get(auth.secretField)?.secret !== true) {
+    throw new Error("Connector manifest network.auth.secretField must be a secret connection field.");
+  }
+  if (!fields.has(auth.userField) || fields.get(auth.userField).secret === true) {
+    throw new Error("Connector manifest network.auth.userField must be a connection field that is not secret.");
+  }
+
+  assertRecord(baseAddress, "Connector manifest network.baseAddress");
+  if (fields.get(baseAddress.field)?.type !== "url" || fields.get(baseAddress.field).secret === true) {
+    throw new Error("Connector manifest network.baseAddress.field must be a url connection field that is not secret.");
+  }
+
+  if (!Array.isArray(endpoints) || endpoints.length < 1 || endpoints.length > 200) {
+    throw new Error("Connector manifest network.endpoints must contain 1 to 200 endpoints.");
+  }
+  endpoints.forEach((endpoint, index) => {
+    const label = "Connector manifest network.endpoints[" + index + "]";
+    assertRecord(endpoint, label);
+    if (!httpMethods.has(endpoint.method)) {
+      throw new Error(label + ".method is invalid.");
+    }
+    assertString(endpoint.path, label + ".path", { min: 1, max: 500 });
+    if (!endpoint.path.startsWith("/") || endpoint.path.includes("://") || endpoint.path.endsWith("/")) {
+      throw new Error(label + ".path must be a path relative to the site URL, such as /rest/api/3/myself.");
+    }
+  });
+
+  if (!Array.isArray(requestHeaders)) {
+    throw new Error("Connector manifest network.requestHeaders must be a list.");
+  }
+  requestHeaders.forEach((header, index) => {
+    assertString(header, "Connector manifest network.requestHeaders[" + index + "]", { min: 1, max: 100 });
+    if (deniedRequestHeaders.has(header.toLowerCase())) {
+      throw new Error("Connector manifest network.requestHeaders may not list " + header + ".");
+    }
+  });
+}
+
 export function assertConnectorPluginManifest(manifest) {
   assertRecord(manifest, "Connector manifest");
   assertString(manifest.id, "Connector manifest id", {
@@ -116,8 +183,8 @@ export function assertConnectorPluginManifest(manifest) {
     pattern: pluginVersionPattern,
   });
 
-  if (manifest.apiVersion !== 3) {
-    throw new Error("Connector manifest API version must be 3.");
+  if (manifest.apiVersion !== 4) {
+    throw new Error("Connector manifest API version must be 4.");
   }
 
   assertRecord(manifest.capabilities, "Connector manifest capabilities");
@@ -176,5 +243,6 @@ export function assertConnectorPluginManifest(manifest) {
   }
 
   manifest.connectionFields.forEach(assertConnectionField);
+  assertNetwork(manifest);
   return manifest;
 }

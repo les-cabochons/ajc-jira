@@ -91,9 +91,10 @@ export async function writeJiraDescription(
   }
 
   try {
-    await requestJira(config, `/rest/api/3/issue/${encodeURIComponent(key)}`, {
+    await requestJira(config, {
       method: "PUT",
-      body: JSON.stringify({ fields: { description } }),
+      path: `/rest/api/3/issue/${encodeURIComponent(key)}`,
+      body: { fields: { description } },
     });
   } catch (error) {
     // A conflicting update, as Jira answers one: if someone changed the

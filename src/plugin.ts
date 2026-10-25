@@ -1,12 +1,6 @@
-import type {
-  BacklogReadDescriptionRequest,
-  BacklogWriteDescriptionRequest,
-  ConnectorFieldValues,
-  ConnectorPluginConnection,
-  ConnectorSettleStatesRequest,
-  ConnectorSettleWriteRequest,
-  ConnectorSyncWorkItem,
-} from "./contract.js";
+import type {} from "@ajour/plugin-sdk/globals";
+import type { PluginConnection, PluginModule } from "@ajour/plugin-sdk";
+import type { ConnectorFieldValues } from "./contract.js";
 import { parseConnectorFieldValues } from "./contract.js";
 import {
   syncJiraConnection,
@@ -17,10 +11,21 @@ import { listJiraSettleStates, writeJiraSettle } from "./settle.js";
 import { readJiraDescription } from "./description-source.js";
 import { writeJiraDescription } from "./description-write.js";
 
+/*
+ * The plugin's entrypoint, loaded as an ES module in Ajour's sandboxed worker
+ * (plugin API 4). Each export is one operation. The connection an operation
+ * receives holds no secret: the API token stays with Ajour's broker, which
+ * attaches it, with the email, as Basic auth on every `ajour.http` request.
+ */
+
 const TASK_ICON_DISPLAY_MODES = new Set(["always", "fallback", "never"]);
 
-function buildJiraConfig(values: ConnectorFieldValues, connection?: { id: string; label: string; tenantLabel: string }): JiraConnectionInput {
-  const parsed = parseConnectorFieldValues(values);
+function optionalText(value: unknown) {
+  return typeof value === "string" && value.trim() ? value.trim() : undefined;
+}
+
+function buildJiraConfig(connection: PluginConnection): JiraConnectionInput {
+  const parsed: ConnectorFieldValues = parseConnectorFieldValues(connection.config);
 
   if (typeof parsed.baseUrl !== "string" || !parsed.baseUrl.trim()) {
     throw new Error('Jira field "baseUrl" is required.');
@@ -30,48 +35,30 @@ function buildJiraConfig(values: ConnectorFieldValues, connection?: { id: string
     throw new Error('Jira field "email" is required.');
   }
 
-  if (typeof parsed.apiToken !== "string" || !parsed.apiToken.trim()) {
-    throw new Error('Jira field "apiToken" is required.');
-  }
-
   if (parsed.queryScope !== "assigned_to_me" && parsed.queryScope !== "project_open_issues") {
     throw new Error('Jira field "queryScope" is invalid.');
   }
 
   return {
-    id: connection?.id,
-    label: connection?.label ?? "Jira",
-    tenantLabel: connection?.tenantLabel ?? "Default workspace",
+    id: connection.id,
+    label: connection.label,
+    tenantLabel: connection.tenantLabel,
     baseUrl: parsed.baseUrl,
     email: parsed.email,
-    apiToken: parsed.apiToken,
-    projectKey:
-      typeof parsed.projectKey === "string" && parsed.projectKey.trim()
-        ? parsed.projectKey.trim()
-        : undefined,
+    projectKey: optionalText(parsed.projectKey),
     queryScope: parsed.queryScope,
-    originalEstimateFieldName:
-      typeof parsed.originalEstimateFieldName === "string" && parsed.originalEstimateFieldName.trim()
-        ? parsed.originalEstimateFieldName.trim()
-        : undefined,
-    remainingEstimateFieldName:
-      typeof parsed.remainingEstimateFieldName === "string" && parsed.remainingEstimateFieldName.trim()
-        ? parsed.remainingEstimateFieldName.trim()
-        : undefined,
-    completedEstimateFieldName:
-      typeof parsed.completedEstimateFieldName === "string" && parsed.completedEstimateFieldName.trim()
-        ? parsed.completedEstimateFieldName.trim()
-        : undefined,
+    originalEstimateFieldName: optionalText(parsed.originalEstimateFieldName),
+    remainingEstimateFieldName: optionalText(parsed.remainingEstimateFieldName),
+    completedEstimateFieldName: optionalText(parsed.completedEstimateFieldName),
   };
 }
 
-export async function validateConnection(config: ConnectorFieldValues) {
-  const parsed = parseConnectorFieldValues(config);
-  const jiraConfig = buildJiraConfig(parsed);
-  const validation = await validateJiraConnection(jiraConfig);
+export const validateConnection: NonNullable<PluginModule["validateConnection"]> = async (connection) => {
+  const config = parseConnectorFieldValues(connection.config);
+  const validation = await validateJiraConnection(buildJiraConfig(connection));
   if (
-    typeof parsed.taskIconDisplayMode !== "string" ||
-    !TASK_ICON_DISPLAY_MODES.has(parsed.taskIconDisplayMode)
+    typeof config.taskIconDisplayMode !== "string" ||
+    !TASK_ICON_DISPLAY_MODES.has(config.taskIconDisplayMode)
   ) {
     return validation;
   }
@@ -80,45 +67,24 @@ export async function validateConnection(config: ConnectorFieldValues) {
     ...validation,
     normalizedConfig: {
       ...validation.normalizedConfig,
-      taskIconDisplayMode: parsed.taskIconDisplayMode,
+      taskIconDisplayMode: config.taskIconDisplayMode,
     },
   };
-}
+};
 
-export async function syncConnection(
-  connection: ConnectorPluginConnection,
-  workItems: ConnectorSyncWorkItem[] = [],
-) {
-  const jiraConfig = buildJiraConfig(connection.config, connection);
-  return await syncJiraConnection(jiraConfig, workItems);
-}
+export const syncConnection: NonNullable<PluginModule["syncConnection"]> = async (connection, workItems = []) =>
+  await syncJiraConnection(buildJiraConfig(connection), workItems);
 
 /** The issue's current description, read when the user edits it in Ajour. */
-export async function readDescription(
-  connection: ConnectorPluginConnection,
-  request: BacklogReadDescriptionRequest,
-) {
-  return await readJiraDescription(buildJiraConfig(connection.config, connection), request);
-}
+export const readDescription: NonNullable<PluginModule["readDescription"]> = async (connection, request) =>
+  await readJiraDescription(buildJiraConfig(connection), request);
 
 /** Writes the user's edit, unless the issue's description changed since it was read. */
-export async function writeDescription(
-  connection: ConnectorPluginConnection,
-  request: BacklogWriteDescriptionRequest,
-) {
-  return await writeJiraDescription(buildJiraConfig(connection.config, connection), request);
-}
+export const writeDescription: NonNullable<PluginModule["writeDescription"]> = async (connection, request) =>
+  await writeJiraDescription(buildJiraConfig(connection), request);
 
-export async function listSettleStates(
-  connection: ConnectorPluginConnection,
-  request: ConnectorSettleStatesRequest,
-) {
-  return await listJiraSettleStates(buildJiraConfig(connection.config, connection), request.sourceId);
-}
+export const listSettleStates: NonNullable<PluginModule["listSettleStates"]> = async (connection, request) =>
+  await listJiraSettleStates(buildJiraConfig(connection), request.sourceId);
 
-export async function writeSettle(
-  connection: ConnectorPluginConnection,
-  request: ConnectorSettleWriteRequest,
-) {
-  return await writeJiraSettle(buildJiraConfig(connection.config, connection), request);
-}
+export const writeSettle: NonNullable<PluginModule["writeSettle"]> = async (connection, request) =>
+  await writeJiraSettle(buildJiraConfig(connection), request);

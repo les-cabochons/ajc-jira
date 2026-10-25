@@ -51,17 +51,16 @@ function toSettleState(status: JiraStatus | undefined) {
 }
 
 async function fetchIssue(config: JiraConnectionInput, key: string) {
-  return await requestJira<JiraIssue>(
-    config,
-    `/rest/api/3/issue/${encodeURIComponent(key)}?fields=status,priority`,
-  );
+  return await requestJira<JiraIssue>(config, {
+    path: `/rest/api/3/issue/${encodeURIComponent(key)}`,
+    query: { fields: "status,priority" },
+  });
 }
 
 async function fetchTransitions(config: JiraConnectionInput, key: string) {
-  const response = await requestJira<JiraTransitionsResponse>(
-    config,
-    `/rest/api/3/issue/${encodeURIComponent(key)}/transitions`,
-  );
+  const response = await requestJira<JiraTransitionsResponse>(config, {
+    path: `/rest/api/3/issue/${encodeURIComponent(key)}/transitions`,
+  });
   return response.transitions ?? [];
 }
 
@@ -126,9 +125,10 @@ export async function writeJiraSettle(
     if (!priorityName) {
       throw new Error(`"${request.priority}" is not an Ajour priority level.`);
     }
-    await requestJira(config, `/rest/api/3/issue/${encodeURIComponent(key)}`, {
+    await requestJira(config, {
       method: "PUT",
-      body: JSON.stringify({ fields: { priority: { name: priorityName } } }),
+      path: `/rest/api/3/issue/${encodeURIComponent(key)}`,
+      body: { fields: { priority: { name: priorityName } } },
     });
   }
 
@@ -146,14 +146,11 @@ export async function writeJiraSettle(
           `Jira has no transition from "${current ?? "its status"}" to "${request.state}" for ${key}.`,
         );
       }
-      await requestJira(
-        config,
-        `/rest/api/3/issue/${encodeURIComponent(key)}/transitions`,
-        {
-          method: "POST",
-          body: JSON.stringify({ transition: { id: transitionId } }),
-        },
-      );
+      await requestJira(config, {
+        method: "POST",
+        path: `/rest/api/3/issue/${encodeURIComponent(key)}/transitions`,
+        body: { transition: { id: transitionId } },
+      });
     }
   }
 
